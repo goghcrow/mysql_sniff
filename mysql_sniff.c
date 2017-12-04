@@ -7,12 +7,14 @@
 #include <assert.h>
 
 #include "mysql_sniff.h"
-#include "sniff.h"
+#include "tcpsniff.h"
 #include "buffer.h"
 #include "khash.h"
 
 /*
 TODO:
+main 函数 & 命令行参数处理
+日志级别处理
 FIX 5.7 EOF 问题 conn_data->num_fields = conn_data->stmt_num_params;
 1. 处理 mysql 5.7 协议变更, 无 EOF packet
 0. 5.7 新协议 有问题 SET NAMES utf8 返回 解析有问题,, 状态不对...读到 ResultSet 了
@@ -25,6 +27,62 @@ FIX 5.7 EOF 问题 conn_data->num_fields = conn_data->stmt_num_params;
 OK: 支持多mysql端口
 OK: 测试 新旧 两种协议 同时连接的场景
 用简单的 strmap 处理 ResultSet 结果集?!  string <=> string
+
+
+// 以下 打印处理
+
+decoding table: exec_flags 
+static const value_string mysql_exec_flags_vals[] = {
+	{MYSQL_CURSOR_TYPE_NO_CURSOR, "Defaults"},
+	{MYSQL_CURSOR_TYPE_READ_ONLY, "Read-only cursor"},
+	{MYSQL_CURSOR_TYPE_FOR_UPDATE, "Cursor for update"},
+	{MYSQL_CURSOR_TYPE_SCROLLABLE, "Scrollable cursor"},
+	{0, NULL}
+};
+
+decoding table: new_parameter_bound_flag 
+static const value_string mysql_new_parameter_bound_flag_vals[] = {
+	{0, "Subsequent call"},
+	{1, "First call or rebound"},
+	{0, NULL}
+};
+
+decoding table: exec_time_sign 
+static const value_string mysql_exec_time_sign_vals[] = {
+	{0, "Positive"},
+	{1, "Negative"},
+	{0, NULL}
+};
+
+allowed MYSQL_SHUTDOWN levels 
+static const value_string mysql_shutdown_vals[] = {
+	{0,   "default"},
+	{1,   "wait for connections to finish"},
+	{2,   "wait for transactions to finish"},
+	{8,   "wait for updates to finish"},
+	{16,  "wait flush all buffers"},
+	{17,  "wait flush critical buffers"},
+	{254, "kill running queries"},
+	{255, "kill connections"},
+	{0, NULL}
+};
+
+
+allowed MYSQL_SET_OPTION values 
+static const value_string mysql_option_vals[] = {
+	{0, "multi statements on"},
+	{1, "multi statements off"},
+	{0, NULL}
+};
+
+static const value_string mysql_session_track_type_vals[] = {
+	{0, "SESSION_SYSVARS_TRACKER"},
+	{1, "CURRENT_SCHEMA_TRACKER"},
+	{2, "SESSION_STATE_CHANGE_TRACKER"},
+	{0, NULL}
+};
+
+
 */
 
 #if !defined(UNUSED)

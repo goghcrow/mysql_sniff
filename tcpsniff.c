@@ -24,7 +24,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <assert.h>
-#include "sniff.h"
+#include "tcpsniff.h"
 
 
 static bool tcp_parse_recv_options(const struct tcphdr *th, struct tcpopt *opt);
