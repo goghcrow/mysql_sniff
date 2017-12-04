@@ -5,6 +5,7 @@
 #include <arpa/inet.h>
 #include <string.h>
 #include <assert.h>
+#include <inttypes.h>
 
 #include "mysql_sniff.h"
 #include "tcpsniff.h"
@@ -353,7 +354,7 @@ mysql_ss_release(struct mysql_ss *ss)
     {
         if (ss->serv[i])
         {
-            for (j = 0; j <= SESSION_BK_SZ; j++)
+            for (j = 0; j < SESSION_BK_SZ; j++)
             {
                 head = ss->serv[i]->bk[j];
                 while (head)
@@ -1667,14 +1668,14 @@ mysql_dissect_result_header(struct buffer *buf, mysql_conn_data_t *conn_data)
 {
     LOG_INFO("Tabular");
     uint64_t num_fields = buf_readFle(buf, NULL, NULL);
-    LOG_INFO("num fields %llu", num_fields);
+    LOG_INFO("num fields %" PRIu64, num_fields);
     // FIX 5.7 EOF 问题
     conn_data->num_fields = num_fields;
     conn_data->cur_field = 0;
     if (buf_readable(buf))
     {
         uint64_t extra = buf_readFle(buf, NULL, NULL);
-        LOG_INFO("extra %llu", extra);
+        LOG_INFO("extra %" PRIu64, extra);
     }
 
     if (num_fields)
@@ -1693,12 +1694,12 @@ mysql_dissect_ok_packet(struct buffer *buf, mysql_conn_data_t *conn_data)
     LOG_INFO("OK");
 
     uint64_t affected_rows = buf_readFle(buf, NULL, NULL);
-    LOG_INFO("affected rows %llu", affected_rows);
+    LOG_INFO("affected rows %" PRIu64, affected_rows);
 
     uint64_t insert_id = buf_readFle(buf, NULL, NULL);
     if (insert_id)
     {
-        LOG_INFO("insert id %llu", insert_id);
+        LOG_INFO("insert id %" PRIu64, insert_id);
     }
 
     uint16_t server_status = 0;
@@ -1733,7 +1734,7 @@ mysql_dissect_ok_packet(struct buffer *buf, mysql_conn_data_t *conn_data)
             if (server_status & MYSQL_STAT_SESSION_STATE_CHANGED)
             {
                 uint64_t session_track_length = buf_readFle(buf, NULL, NULL);
-                LOG_INFO("Session Track Length %llu", session_track_length);
+                LOG_INFO("Session Track Length %" PRIu64, session_track_length);
 
                 while (session_track_length > 0)
                 {
@@ -1760,7 +1761,7 @@ static void
 mysql_dissect_field_packet(struct buffer *buf, mysql_conn_data_t *conn_data)
 {
     conn_data->cur_field++;
-    LOG_INFO("Field %llu", conn_data->cur_field);
+    LOG_INFO("Field %" PRIu64, conn_data->cur_field);
 
     buf_readFleStr(buf, g_buf, BUFSZ);
     LOG_INFO("Catalog %s", g_buf);
@@ -2118,11 +2119,11 @@ mysql_dissect_exec_longlong(struct buffer *buf, uint8_t param_unsigned, int *par
     *param_idx += sizeof(uint64_t);
     if (param_unsigned)
     {
-        LOG_INFO("Mysql Exec LongLong %llu", mysql_exec_field_longlong);
+        LOG_INFO("Mysql Exec LongLong %" PRIu64, mysql_exec_field_longlong);
     }
     else
     {
-        LOG_INFO("Mysql Exec LongLong %lld", (int64_t)mysql_exec_field_longlong);
+        LOG_INFO("Mysql Exec LongLong %" PRId64, (int64_t)mysql_exec_field_longlong);
     }
 
     buf_setReadIndex(buf, idx);
