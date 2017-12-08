@@ -1,18 +1,8 @@
 #ifndef SNIFF_H
 #define SNIFF_H
 
-// tcphdr 使用了 bsd的定义, 懒得改了
-#ifndef _BSD_SOURCE
-#define _BSD_SOURCE
-#endif
 #include <pcap/pcap.h>
-#ifndef __USE_BSD
-#define __USE_BSD
-#endif
 #include <netinet/ip.h>
-#ifndef __FAVOR_BSD
-#define __FAVOR_BSD
-#endif
 #include <netinet/tcp.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -24,24 +14,23 @@
 对pcap的简单封装 只抓tcp包
 */
 
-
 struct tcpsniff_opt
 {
-    int snaplen;       /* 最大捕获长度               */
-    int pkt_cnt_limit; /* 限制捕获pkt数量0:unlimited */
-    int timeout_limit; /* 多少ms从内核copy一次数据    */
-    char *device;      /* 网卡                      */
-    char *filter_exp;  /* bpf 表达式                */
-    void *ud;          /* 回调第一个参数              */
+  int snaplen;       /* 最大捕获长度               */
+  int pkt_cnt_limit; /* 限制捕获pkt数量0:unlimited */
+  int timeout_limit; /* 多少ms从内核copy一次数据    */
+  char *device;      /* 网卡                      */
+  char *filter_exp;  /* bpf 表达式                */
+  void *ud;          /* 回调第一个参数              */
 };
 
 struct tcpopt
 {
-  uint32_t rcv_tsval;     /* Time stamp value */
-  uint32_t rcv_tsecr;     /* Time stamp echo reply */
-  uint8_t sack_ok;        /* SACK seen on SYN packet	*/
-  uint8_t snd_wscale;     /* Window scaling received from sender	*/
-  uint16_t mss_clamp;     /* Maximal mss, negotiated at connection setup */
+  uint32_t rcv_tsval; /* Time stamp value */
+  uint32_t rcv_tsecr; /* Time stamp echo reply */
+  uint8_t sack_ok;    /* SACK seen on SYN packet	*/
+  uint8_t snd_wscale; /* Window scaling received from sender	*/
+  uint16_t mss_clamp; /* Maximal mss, negotiated at connection setup */
 };
 
 typedef void (*tcpsniff_pkt_handler)(void *ud,
@@ -54,12 +43,7 @@ typedef void (*tcpsniff_pkt_handler)(void *ud,
 bool tcpsniff(struct tcpsniff_opt *, tcpsniff_pkt_handler);
 void tcpsniff_exit();
 
-
-
-
-
-
-// 可能BSD的定义太旧了, centos下 _BSD_SOURCE 竟然没有这俩货
+/* 可能BSD的定义太旧了, centos下 _BSD_SOURCE 竟然没有这俩货 */
 #ifndef TH_ECE
 #define TH_ECE 0x40
 #endif
@@ -112,6 +96,5 @@ void tcpsniff_exit();
 #define TCP_SACK_SEEN (1 << 0)    /*1 = peer is SACK capable, */
 #define TCP_FACK_ENABLED (1 << 1) /*1 = FACK is enabled locally*/
 #define TCP_DSACK_SEEN (1 << 2)   /*1 = DSACK was received from peer*/
-
 
 #endif

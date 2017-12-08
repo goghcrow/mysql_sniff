@@ -86,6 +86,7 @@ static const value_string mysql_session_track_type_vals[] = {
 
 */
 
+/* thanks for https://github.com/wireshark/wireshark/blob/master/epan/dissectors/packet-mysql.c */
 #if !defined(UNUSED)
 #define UNUSED(x) ((void)(x))
 #endif
@@ -267,10 +268,12 @@ mysql_conn_data_release(struct mysql_conn_data *d)
     }
 
     // 释放保存的所有事务元信息
-    struct mysql_stmt_data* stmt_data;
+    struct mysql_stmt_data *stmt_data;
     khint_t k;
-    for (k = kh_begin(d->stmts); k != kh_end(d->stmts); ++k) {
-        if (kh_exist(d->stmts, k)) {
+    for (k = kh_begin(d->stmts); k != kh_end(d->stmts); ++k)
+    {
+        if (kh_exist(d->stmts, k))
+        {
             stmt_data = kh_value(d->stmts, k);
             mysql_stmt_data_release(stmt_data);
         }
@@ -462,7 +465,8 @@ mysql_ss_add_internal(struct mysql_ss *ss, struct tuple4 *t4)
         {
             int idx = SESSION_BK_IDX(t4->cli_port);
             new = mysql_session_create(t4);
-            if (new == NULL) {
+            if (new == NULL)
+            {
                 assert(false);
             }
             new->next = ss->serv[i]->bk[idx];
@@ -568,22 +572,40 @@ void pkt_handle(void *ud,
     static char d_ip_buf[INET_ADDRSTRLEN];
 
     uint32_t s_ip = ip_hdr->ip_src.s_addr;
+#ifdef __APPLE__
     uint16_t s_port = ntohs(tcp_hdr->th_sport);
+#else
+    uint16_t s_port = ntohs(tcp_hdr->source);
+#endif
 
     uint32_t d_ip = ip_hdr->ip_dst.s_addr;
+#ifdef __APPLE__
     uint16_t d_port = ntohs(tcp_hdr->th_dport);
+#else
+    uint16_t d_port = ntohs(tcp_hdr->dest);
+#endif
 
     inet_ntop(AF_INET, &(ip_hdr->ip_src.s_addr), s_ip_buf, INET_ADDRSTRLEN);
     inet_ntop(AF_INET, &(ip_hdr->ip_dst.s_addr), d_ip_buf, INET_ADDRSTRLEN);
 
+#ifdef __APPLE__
     printf("%s:%d > %s:%d ack %u, seq %u, sz %zd\n", s_ip_buf, s_port, d_ip_buf, d_port,
            ntohl(tcp_hdr->th_ack), ntohl(tcp_hdr->th_seq), payload_size);
+#else
+    printf("%s:%d > %s:%d ack %u, seq %u, sz %zd\n", s_ip_buf, s_port, d_ip_buf, d_port,
+           ntohl(tcp_hdr->ack_seq), ntohl(tcp_hdr->seq), payload_size);
+#endif
 
     struct mysql_ss *ss = (struct mysql_ss *)ud;
     mysql_tuple4_init(&t4, s_ip, s_port, d_ip, d_port);
 
-    // 连接关闭, 清理数据
+// 连接关闭, 清理数据
+#ifdef __APPLE__
     if (tcp_hdr->th_flags & TH_FIN || tcp_hdr->th_flags & TH_RST)
+#else
+    if (tcp_hdr->fin || tcp_hdr->rst)
+#endif
+
     {
         LOG_INFO("%s:%d > %s:%d Close Connection", s_ip_buf, s_port, d_ip_buf, d_port);
         mysql_ss_del(ss, &t4);
@@ -670,14 +692,15 @@ void pkt_handle(void *ud,
 
 int main(int argc, char **argv)
 {
-    char *device;
-    if (argc < 2)
-    {
-        device = "lo0";
-    }
-    else
+    char *device = "en0";
+    char *filter = "tcp and port 3306";
+    if (argc >= 2)
     {
         device = argv[1];
+    }
+    if (argc >= 3)
+    {
+        filter = argv[2];
     }
 
     uint16_t mysql_server_ports[1] = {3306};
@@ -688,9 +711,8 @@ int main(int argc, char **argv)
         .snaplen = 65535,
         .pkt_cnt_limit = 0,
         .timeout_limit = 10,
-        // .device = device,
-        .device = "lo0",
-        .filter_exp = "tcp and port 3306",
+        .device = device,
+        .filter_exp = filter,
         .ud = ss};
 
     if (!tcpsniff(&opt, pkt_handle))
@@ -1454,7 +1476,7 @@ mysql_dissect_request(struct buffer *buf, mysql_conn_data_t *conn_data)
         uint16_t binlog_flags = buf_readInt16(buf); // BIG_ENDIAN !!!
         uint32_t binlog_server_id = buf_readInt32LE(buf);
         LOG_INFO("Mysql Binlog Dump binlogPosition %u binlogFlags 0x%04x binlogServerId %u",
-                binlog_position, binlog_flags, binlog_server_id);
+                 binlog_position, binlog_flags, binlog_server_id);
     }
 
         /* binlog file name ? */

@@ -1,13 +1,3 @@
-#ifndef _BSD_SOURCE
-#define _BSD_SOURCE
-#endif
-#ifndef __USE_BSD
-#define __USE_BSD
-#endif
-#ifndef __FAVOR_BSD
-#define __FAVOR_BSD
-#endif
-
 #include <pcap/pcap.h>
 #include <pcap/bpf.h>
 #include <pcap/sll.h>
@@ -25,7 +15,6 @@
 #include <stddef.h>
 #include <assert.h>
 #include "tcpsniff.h"
-
 
 static bool tcp_parse_recv_options(const struct tcphdr *th, struct tcpopt *opt);
 
@@ -122,7 +111,7 @@ static void pcap_pkt_handler(struct tcpsniff_t *sniff, const struct pcap_pkthdr 
     }
     */
 
-    // 或者 强制类型转换, 不需要自己算, 直接读, 这里为什么不用自己ntoh转字节序????????
+    // 或者 强制类型转换, 不需要自己算, 直接读
 
     struct ip *ip_hdr = (struct ip *)(pkt + sniff->dl_hdr_offset);
 
@@ -143,8 +132,13 @@ static void pcap_pkt_handler(struct tcpsniff_t *sniff, const struct pcap_pkthdr 
         return;
     }
     struct tcphdr *tcp_hdr = (struct tcphdr *)(pkt + sniff->dl_hdr_offset + ip_hdr_sz);
+#ifdef __APPLE__
     int tcp_hdr_sz = tcp_hdr->th_off * 4;
     int tcp_hdr_opt_sz = tcp_hdr_sz - sizeof(struct tcphdr); // tcp_hdr_min_len: 20
+#else
+    int tcp_hdr_sz = tcp_hdr->doff * 4;
+    int tcp_hdr_opt_sz = tcp_hdr_sz - sizeof(struct tcphdr); // tcp_hdr_min_len: 20
+#endif
 
     struct tcpopt tcp_opt;
     memset(&tcp_opt, 0, sizeof(tcp_opt));
@@ -305,7 +299,11 @@ static inline bool tcp_parse_aligned_timestamp(struct tcpopt *opt, const struct 
  */
 static bool tcp_parse_recv_options(const struct tcphdr *th, struct tcpopt *opt)
 {
+#ifdef __APPLE__
     int th_off = th->th_off;
+#else
+    int th_off = th->doff;
+#endif
     // tcp hdr的offset要*4才是真实大小
     if (th_off == (sizeof(*th) / 4))
     {
