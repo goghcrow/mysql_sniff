@@ -3,9 +3,14 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <arpa/inet.h>
+#ifndef _BSD_SOURCE
+#define _BSD_SOURCE
+#endif /* strsep */
 #include <string.h>
 #include <assert.h>
 #include <inttypes.h>
+#include <unistd.h> /*getopt*/
+#include <ctype.h>  /*isspace*/
 
 #include "mysql_sniff.h"
 #include "tcpsniff.h"
@@ -557,171 +562,6 @@ mysql_stmt_data_release(struct mysql_stmt_data *stmt_data)
         free(stmt_data->param_flags);
     }
     free(stmt_data);
-}
-
-void pkt_handle(void *ud,
-                const struct pcap_pkthdr *pkt_hdr,
-                const struct ip *ip_hdr,
-                const struct tcphdr *tcp_hdr,
-                const struct tcpopt *tcp_opt,
-                const u_char *payload,
-                size_t payload_size)
-{
-    static struct tuple4 t4;
-    static char s_ip_buf[INET_ADDRSTRLEN];
-    static char d_ip_buf[INET_ADDRSTRLEN];
-
-    uint32_t s_ip = ip_hdr->ip_src.s_addr;
-#ifdef __APPLE__
-    uint16_t s_port = ntohs(tcp_hdr->th_sport);
-#else
-    uint16_t s_port = ntohs(tcp_hdr->source);
-#endif
-
-    uint32_t d_ip = ip_hdr->ip_dst.s_addr;
-#ifdef __APPLE__
-    uint16_t d_port = ntohs(tcp_hdr->th_dport);
-#else
-    uint16_t d_port = ntohs(tcp_hdr->dest);
-#endif
-
-    inet_ntop(AF_INET, &(ip_hdr->ip_src.s_addr), s_ip_buf, INET_ADDRSTRLEN);
-    inet_ntop(AF_INET, &(ip_hdr->ip_dst.s_addr), d_ip_buf, INET_ADDRSTRLEN);
-
-#ifdef __APPLE__
-    printf("%s:%d > %s:%d ack %u, seq %u, sz %zd\n", s_ip_buf, s_port, d_ip_buf, d_port,
-           ntohl(tcp_hdr->th_ack), ntohl(tcp_hdr->th_seq), payload_size);
-#else
-    printf("%s:%d > %s:%d ack %u, seq %u, sz %zd\n", s_ip_buf, s_port, d_ip_buf, d_port,
-           ntohl(tcp_hdr->ack_seq), ntohl(tcp_hdr->seq), payload_size);
-#endif
-
-    struct mysql_ss *ss = (struct mysql_ss *)ud;
-    mysql_tuple4_init(&t4, s_ip, s_port, d_ip, d_port);
-
-// 连接关闭, 清理数据
-#ifdef __APPLE__
-    if (tcp_hdr->th_flags & TH_FIN || tcp_hdr->th_flags & TH_RST)
-#else
-    if (tcp_hdr->fin || tcp_hdr->rst)
-#endif
-
-    {
-        LOG_INFO("%s:%d > %s:%d Close Connection", s_ip_buf, s_port, d_ip_buf, d_port);
-        mysql_ss_del(ss, &t4);
-        return;
-    }
-
-    if (payload_size <= 0)
-    {
-        return;
-    }
-
-    bool is_response;
-    struct mysql_session *s = mysql_ss_get(ss, &t4);
-    struct buffer *buf = mysql_session_getbuf(s, &t4, s_port, &is_response);
-    buf_append(buf, (const char *)payload, payload_size);
-
-    // 一个 tcp segment 包括 N 个 Mysql Packet
-    while (mysql_is_completed_pdu(buf))
-    {
-        if (s->conn_data->frame_start_compressed &&
-            s->conn_data->compressed_state == MYSQL_COMPRESS_ACTIVE)
-        {
-            LOG_INFO("Start Compressed Active");
-            /*
- * Decode the header of a compressed packet
- * https://dev.mysql.com/doc/internals/en/compressed-packet-header.html
- */
-            int32_t cmp_pkt_sz = buf_readInt32LE24(buf);
-            uint8_t cmp_pkt_num = buf_readInt8(buf);
-            int32_t cmp_pkt_uncmp_sz = buf_readInt32LE24(buf);
-
-            UNUSED(cmp_pkt_sz);
-            UNUSED(cmp_pkt_num);
-            UNUSED(cmp_pkt_uncmp_sz);
-        }
-
-        int32_t pkt_sz = buf_readInt32LE24(buf);
-        uint8_t pkt_num = buf_readInt8(buf);
-        LOG_INFO("%s:%d > %s:%d pkt_sz %d, pkt_no %d", s_ip_buf, s_port, d_ip_buf, d_port, pkt_sz, pkt_num);
-
-        // 这里不用担心频繁创建只读视图, 内部有缓存
-        struct buffer *rbuf = buf_readonlyView(buf, pkt_sz);
-        buf_retrieve(buf, pkt_sz);
-
-        // TODO 检测是否是 SSL !!!
-        bool is_ssl = false;
-
-        if (is_response)
-        {
-            if (pkt_num == 0 && s->conn_data->state == UNDEFINED)
-            {
-                mysql_dissect_greeting(rbuf, s->conn_data);
-            }
-            else
-            {
-                mysql_dissect_response(rbuf, s->conn_data);
-            }
-        }
-        else
-        {
-            // TODO 这里 有问题, 暂时没进入该分支 !!!!, 抓取不到 login
-            if (s->conn_data->state == LOGIN && (pkt_num == 1 || (pkt_num == 2 && is_ssl)))
-            {
-                mysql_dissect_login(rbuf, s->conn_data);
-                if ((s->conn_data->srv_caps & MYSQL_CAPS_CP) && (s->conn_data->clnt_caps & MYSQL_CAPS_CP))
-                {
-                    s->conn_data->frame_start_compressed = 1;
-                    s->conn_data->compressed_state = MYSQL_COMPRESS_INIT;
-                }
-            }
-            else
-            {
-                mysql_dissect_request(rbuf, s->conn_data);
-            }
-        }
-        buf_release(rbuf);
-    }
-
-    if (buf_internalCapacity(buf) > 1024 * 1024)
-    {
-        buf_shrink(buf, 0);
-    }
-}
-
-int main(int argc, char **argv)
-{
-    char *device = "en0";
-    char *filter = "tcp and port 3306";
-    if (argc >= 2)
-    {
-        device = argv[1];
-    }
-    if (argc >= 3)
-    {
-        filter = argv[2];
-    }
-
-    uint16_t mysql_server_ports[1] = {3306};
-    struct mysql_ss *ss = mysql_ss_create(mysql_server_ports, 1);
-    assert(ss);
-
-    struct tcpsniff_opt opt = {
-        .snaplen = 65535,
-        .pkt_cnt_limit = 0,
-        .timeout_limit = 10,
-        .device = device,
-        .filter_exp = filter,
-        .ud = ss};
-
-    if (!tcpsniff(&opt, pkt_handle))
-    {
-        fprintf(stderr, "fail to sniff\n");
-    }
-    mysql_ss_release(ss);
-
-    return 0;
 }
 
 bool mysql_is_completed_pdu(struct buffer *buf)
@@ -2173,8 +2013,7 @@ mysql_dissect_exec_param(struct buffer *buf, int *param_idx, uint8_t param_flags
 
     uint8_t param_type = buf_readInt8(buf);
     uint8_t param_unsigned = buf_readInt8(buf); /* signedness */
-    // TODO LOG_INFO
-    LOG_ERROR("Type [%s](%d)", mysql_get_field_type(param_type, "未知类型"), param_type);
+    // LOG_ERROR("Type [%s](%d)", mysql_get_field_type(param_type, "未知类型"), param_type);
 
     if ((param_flags & MYSQL_PARAM_FLAG_STREAMED) == MYSQL_PARAM_FLAG_STREAMED)
     {
@@ -2240,4 +2079,319 @@ mysql_dissect_response_prepare(struct buffer *buf, mysql_conn_data_t *conn_data)
     {
         mysql_set_conn_state(conn_data, REQUEST);
     }
+}
+
+/* -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-= */
+
+void pkt_handle(void *ud,
+                const struct pcap_pkthdr *pkt_hdr,
+                const struct ip *ip_hdr,
+                const struct tcphdr *tcp_hdr,
+                const struct tcpopt *tcp_opt,
+                const u_char *payload,
+                size_t payload_size)
+{
+    static struct tuple4 t4;
+    static char s_ip_buf[INET_ADDRSTRLEN];
+    static char d_ip_buf[INET_ADDRSTRLEN];
+
+    uint32_t s_ip = ip_hdr->ip_src.s_addr;
+#ifdef __APPLE__
+    uint16_t s_port = ntohs(tcp_hdr->th_sport);
+#else
+    uint16_t s_port = ntohs(tcp_hdr->source);
+#endif
+
+    uint32_t d_ip = ip_hdr->ip_dst.s_addr;
+#ifdef __APPLE__
+    uint16_t d_port = ntohs(tcp_hdr->th_dport);
+#else
+    uint16_t d_port = ntohs(tcp_hdr->dest);
+#endif
+
+    inet_ntop(AF_INET, &(ip_hdr->ip_src.s_addr), s_ip_buf, INET_ADDRSTRLEN);
+    inet_ntop(AF_INET, &(ip_hdr->ip_dst.s_addr), d_ip_buf, INET_ADDRSTRLEN);
+
+#ifdef __APPLE__
+    printf("%s:%d > %s:%d ack %u, seq %u, sz %zd\n", s_ip_buf, s_port, d_ip_buf, d_port,
+           ntohl(tcp_hdr->th_ack), ntohl(tcp_hdr->th_seq), payload_size);
+#else
+    printf("%s:%d > %s:%d ack %u, seq %u, sz %zd\n", s_ip_buf, s_port, d_ip_buf, d_port,
+           ntohl(tcp_hdr->ack_seq), ntohl(tcp_hdr->seq), payload_size);
+#endif
+
+    struct mysql_ss *ss = (struct mysql_ss *)ud;
+    mysql_tuple4_init(&t4, s_ip, s_port, d_ip, d_port);
+
+// 连接关闭, 清理数据
+#ifdef __APPLE__
+    if (tcp_hdr->th_flags & TH_FIN || tcp_hdr->th_flags & TH_RST)
+#else
+    if (tcp_hdr->fin || tcp_hdr->rst)
+#endif
+
+    {
+        LOG_INFO("%s:%d > %s:%d Close Connection", s_ip_buf, s_port, d_ip_buf, d_port);
+        mysql_ss_del(ss, &t4);
+        return;
+    }
+
+    if (payload_size <= 0)
+    {
+        return;
+    }
+
+    bool is_response;
+    struct mysql_session *s = mysql_ss_get(ss, &t4);
+    struct buffer *buf = mysql_session_getbuf(s, &t4, s_port, &is_response);
+    buf_append(buf, (const char *)payload, payload_size);
+
+    // 一个 tcp segment 包括 N 个 Mysql Packet
+    while (mysql_is_completed_pdu(buf))
+    {
+        if (s->conn_data->frame_start_compressed &&
+            s->conn_data->compressed_state == MYSQL_COMPRESS_ACTIVE)
+        {
+            LOG_INFO("Start Compressed Active");
+            /*
+ * Decode the header of a compressed packet
+ * https://dev.mysql.com/doc/internals/en/compressed-packet-header.html
+ */
+            int32_t cmp_pkt_sz = buf_readInt32LE24(buf);
+            uint8_t cmp_pkt_num = buf_readInt8(buf);
+            int32_t cmp_pkt_uncmp_sz = buf_readInt32LE24(buf);
+
+            UNUSED(cmp_pkt_sz);
+            UNUSED(cmp_pkt_num);
+            UNUSED(cmp_pkt_uncmp_sz);
+        }
+
+        int32_t pkt_sz = buf_readInt32LE24(buf);
+        uint8_t pkt_num = buf_readInt8(buf);
+        LOG_INFO("%s:%d > %s:%d pkt_sz %d, pkt_no %d", s_ip_buf, s_port, d_ip_buf, d_port, pkt_sz, pkt_num);
+
+        // 这里不用担心频繁创建只读视图, 内部有缓存
+        struct buffer *rbuf = buf_readonlyView(buf, pkt_sz);
+        buf_retrieve(buf, pkt_sz);
+
+        // TODO 检测是否是 SSL !!!
+        bool is_ssl = false;
+
+        if (is_response)
+        {
+            if (pkt_num == 0 && s->conn_data->state == UNDEFINED)
+            {
+                mysql_dissect_greeting(rbuf, s->conn_data);
+            }
+            else
+            {
+                mysql_dissect_response(rbuf, s->conn_data);
+            }
+        }
+        else
+        {
+            // TODO 这里 有问题, 暂时没进入该分支 !!!!, 抓取不到 login
+            if (s->conn_data->state == LOGIN && (pkt_num == 1 || (pkt_num == 2 && is_ssl)))
+            {
+                mysql_dissect_login(rbuf, s->conn_data);
+                if ((s->conn_data->srv_caps & MYSQL_CAPS_CP) && (s->conn_data->clnt_caps & MYSQL_CAPS_CP))
+                {
+                    s->conn_data->frame_start_compressed = 1;
+                    s->conn_data->compressed_state = MYSQL_COMPRESS_INIT;
+                }
+            }
+            else
+            {
+                mysql_dissect_request(rbuf, s->conn_data);
+            }
+        }
+        buf_release(rbuf);
+    }
+
+    if (buf_internalCapacity(buf) > 1024 * 1024)
+    {
+        buf_shrink(buf, 0);
+    }
+}
+
+/* -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-= */
+
+static void
+usage()
+{
+    static const char *usage =
+        "\nUsage:\n"
+        "   mysql_sniff -i <interface> -p <mysql_server_port1>,<port2>,<port3>... [-v]\n\n"
+        "Example:\n"
+        "   mysql_sniff -i any -p 3306\n";
+    puts(usage);
+    exit(1);
+}
+
+// 不会修改 inputString, argv[0..cnt]分隔的字符串需要自行释放...
+// _BSD_SOURCE string.h
+static int str_split(const char *inputstring, const char *delim, char **argv, size_t argc)
+{
+    int cnt = 0;
+    char *string, *tofree, **ap;
+    tofree = string = strdup(inputstring);
+    assert(string);
+
+    for (ap = argv; (*ap = strsep(&string, delim)) != NULL;)
+    {
+        if (**ap != '\0')
+        {
+            *ap = strdup(*ap);
+            cnt++;
+            if (++ap >= &argv[argc])
+            {
+                break;
+            }
+        }
+    }
+
+    free(tofree);
+    return cnt;
+}
+
+// 移除前缀后缀 space, 会修改原 char*, 记得备份释放
+static char *str_trim(char *str, const char *trim)
+{
+    char *end;
+    if (str == 0)
+    {
+        return 0;
+    }
+
+    while (isspace((int)*str) || strchr(trim, *str))
+    {
+        str++;
+    }
+
+    if (*str == 0)
+    {
+        return str;
+    }
+
+    end = str + strlen(str) - 1;
+    while (end > str && (isspace((int)*end) || strchr(trim, *end)))
+    {
+        end--;
+    }
+
+    *(end + 1) = 0;
+
+    return str;
+}
+
+#define ASSERT_OPT(assert, reason, ...)                                  \
+    if (!(assert))                                                       \
+    {                                                                    \
+        fprintf(stderr, "\x1B[1;31m" reason "\x1B[0m\n", ##__VA_ARGS__); \
+        usage();                                                         \
+    }
+
+struct mysql_sniff_opts
+{
+    char *interface;
+    char *expression;
+    bool verbose;
+    int port_sz;
+    uint16_t mysql_server_ports[0];
+};
+
+extern char *optarg;
+
+int main(int argc, char **argv)
+{
+    UNUSED(str_split);
+    const char *optString = "i:p:v?";
+    char *port;
+    int opt = 0, max_port_sz = 10, max_filter_sz = 100, i = 0;
+
+    struct mysql_sniff_opts *opts = calloc(1, sizeof(*opts) + max_port_sz * sizeof(uint16_t));
+    assert(opts);
+    opts->expression = calloc(max_filter_sz, sizeof(char));
+    assert(opts->expression);
+
+    opt = getopt(argc, argv, optString);
+    optarg = str_trim(optarg, "=");
+    while (opt != -1)
+    {
+        switch (opt)
+        {
+        case 'i':
+            opts->interface = strdup(optarg);
+            assert(opts->interface);
+            break;
+        case 'p':
+            // size_t needed = snprintf(NULL, 0, , 
+            i += snprintf(opts->expression + i, max_filter_sz - i - 1, "tcp and ( port 0 ");
+            assert(i <= max_filter_sz - 1);
+            while ((port = strsep(&optarg, ",")) != NULL)
+            {
+                if (port)
+                {
+                    if (!atoi(port)) {
+                        LOG_ERROR("端口号有误 %s", port);
+                        goto free;
+                    }
+                    opts->mysql_server_ports[opts->port_sz++] = atoi(port);
+                    i += snprintf(opts->expression + i, max_filter_sz - i - 1, "or port %d ", atoi(port));
+                    assert(i <= max_filter_sz - 1);
+                    if (opts->port_sz >= max_port_sz)
+                    {
+                        LOG_ERROR("端口数超限 max=%d", max_port_sz);
+                        break;
+                    }
+                }
+            }
+            i += snprintf(opts->expression + i, max_filter_sz - i - 1, ")");
+            assert(i <= max_filter_sz - 1);
+            break;
+        case 'v':
+            opts->verbose = !!optarg;
+            break;
+        case '?':
+            usage();
+            break;
+        default:
+            break;
+        }
+        opt = getopt(argc, argv, optString);
+        optarg = str_trim(optarg, "=");
+    }
+    if (!opts->interface)
+    {
+        opts->interface = strdup("eth0");
+        assert(opts->interface);
+    }
+    ASSERT_OPT(opts->port_sz, "必须指定MysqlServer端口, -p=3306,3307,3308");
+
+    struct mysql_ss *ss = mysql_ss_create(opts->mysql_server_ports, opts->port_sz);
+    assert(ss);
+
+    struct tcpsniff_opt sniffopt = {
+        .snaplen = 65535,
+        .pkt_cnt_limit = 0,
+        .timeout_limit = 10,
+        .device = opts->interface,
+        .filter_exp = opts->expression,
+        .ud = ss};
+
+    LOG_INFO("interface %s, expression %s", opts->interface, opts->expression);
+
+    tcpsniff(&sniffopt, pkt_handle); // 内部有错误输出, 不需要判断...
+
+    mysql_ss_release(ss);
+
+free:
+    if (opts->interface)
+    {
+        free(opts->interface);
+    }
+    free(opts->expression);
+    free(opts);
+
+    return 0;
 }
