@@ -483,7 +483,7 @@ char *buf_readCStr(struct buffer *buf, char *str, int sz)
         return NULL;
     }
 
-    memcpy(str, buf_peek(buf), sz);
+    memcpy(str, buf_peek(buf), sz1);
     if (eos == NULL)
     {
         buf_retrieve(buf, sz1 - 1);
