@@ -8,6 +8,7 @@
 - 修复 Wireshark 在 Mysql 5.7 协议下 CLIENT_DEPRECATE_EOF 选项未处理的BUG
 - 仅保留协议解析状态机, 替换 buffer 实现
 - 移除协议树处理, 移除 SSL 处理
+- 支持多端口, 多版本 mysql 协议同时监听
 - 其他
 
 相比 https://github.com/Qihoo360/mysql-sniffer 支持Mysql Statement 解析, 支持更多协议细节;
