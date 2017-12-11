@@ -2530,10 +2530,10 @@ void pkt_handle(void *ud,
     inet_ntop(AF_INET, &(ip_hdr->ip_dst.s_addr), d_ip_buf, INET_ADDRSTRLEN);
 
 #ifdef __APPLE__
-    printf("%s:%d > %s:%d ack %u, seq %u, sz %zd\n", s_ip_buf, s_port, d_ip_buf, d_port,
+    LOG_TRACE("%s:%d > %s:%d ack %u, seq %u, sz %zd", s_ip_buf, s_port, d_ip_buf, d_port,
            ntohl(tcp_hdr->th_ack), ntohl(tcp_hdr->th_seq), payload_size);
 #else
-    printf("%s:%d > %s:%d ack %u, seq %u, sz %zd\n", s_ip_buf, s_port, d_ip_buf, d_port,
+    LOG_TRACE("%s:%d > %s:%d ack %u, seq %u, sz %zd", s_ip_buf, s_port, d_ip_buf, d_port,
            ntohl(tcp_hdr->ack_seq), ntohl(tcp_hdr->seq), payload_size);
 #endif
 
@@ -2548,7 +2548,7 @@ void pkt_handle(void *ud,
 #endif
 
     {
-        LOG_INFO("%s:%d > %s:%d Close Connection", s_ip_buf, s_port, d_ip_buf, d_port);
+        LOG_TRACE("%s:%d > %s:%d Close Connection", s_ip_buf, s_port, d_ip_buf, d_port);
         mysql_ss_del(ss, &t4);
         return;
     }

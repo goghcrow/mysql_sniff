@@ -24,7 +24,7 @@ void mysql_log(int level, const char *fmt, ...)
     // char buf[16];
     // buf[strftime(buf, sizeof(buf), "%H:%M:%S", lt)] = '\0';
     // fprintf(stderr, "[%s %s%5s]\x1b[0m ", buf, level_colors[level], level_names[level]);
-    fprintf(stderr, "[%s%5s]\x1b[0m ", level_colors[level], level_names[level]);    
+    fprintf(stderr, "%s[%5s]\x1b[0m ", level_colors[level], level_names[level]);    
     va_list args;
     va_start(args, fmt);
     vfprintf(stderr, fmt, args);
