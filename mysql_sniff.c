@@ -19,7 +19,7 @@
 
 /*
 TODO:
-main 函数 & 命令行参数处理
+
 日志级别处理
 FIX 5.7 EOF 问题 conn_data->num_fields = conn_data->stmt_num_params;
 1. 处理 mysql 5.7 协议变更, 无 EOF packet
@@ -33,62 +33,6 @@ FIX 5.7 EOF 问题 conn_data->num_fields = conn_data->stmt_num_params;
 OK: 支持多mysql端口
 OK: 测试 新旧 两种协议 同时连接的场景
 用简单的 strmap 处理 ResultSet 结果集?!  string <=> string
-
-
-// 以下 打印处理
-
-decoding table: exec_flags 
-static const value_string mysql_exec_flags_vals[] = {
-	{MYSQL_CURSOR_TYPE_NO_CURSOR, "Defaults"},
-	{MYSQL_CURSOR_TYPE_READ_ONLY, "Read-only cursor"},
-	{MYSQL_CURSOR_TYPE_FOR_UPDATE, "Cursor for update"},
-	{MYSQL_CURSOR_TYPE_SCROLLABLE, "Scrollable cursor"},
-	{0, NULL}
-};
-
-decoding table: new_parameter_bound_flag 
-static const value_string mysql_new_parameter_bound_flag_vals[] = {
-	{0, "Subsequent call"},
-	{1, "First call or rebound"},
-	{0, NULL}
-};
-
-decoding table: exec_time_sign 
-static const value_string mysql_exec_time_sign_vals[] = {
-	{0, "Positive"},
-	{1, "Negative"},
-	{0, NULL}
-};
-
-allowed MYSQL_SHUTDOWN levels 
-static const value_string mysql_shutdown_vals[] = {
-	{0,   "default"},
-	{1,   "wait for connections to finish"},
-	{2,   "wait for transactions to finish"},
-	{8,   "wait for updates to finish"},
-	{16,  "wait flush all buffers"},
-	{17,  "wait flush critical buffers"},
-	{254, "kill running queries"},
-	{255, "kill connections"},
-	{0, NULL}
-};
-
-
-allowed MYSQL_SET_OPTION values 
-static const value_string mysql_option_vals[] = {
-	{0, "multi statements on"},
-	{1, "multi statements off"},
-	{0, NULL}
-};
-
-static const value_string mysql_session_track_type_vals[] = {
-	{0, "SESSION_SYSVARS_TRACKER"},
-	{1, "CURRENT_SCHEMA_TRACKER"},
-	{2, "SESSION_STATE_CHANGE_TRACKER"},
-	{0, NULL}
-};
-
-
 */
 
 /* thanks for https://github.com/wireshark/wireshark/blob/master/epan/dissectors/packet-mysql.c */
@@ -1208,8 +1152,7 @@ mysql_dissect_request(struct buffer *buf, mysql_conn_data_t *conn_data)
     case MYSQL_SHUTDOWN:
     {
         uint8_t mysql_shutdown = buf_readInt8(buf);
-        UNUSED(mysql_shutdown);
-        LOG_INFO("Mysql Shutdown");
+        LOG_INFO("Mysql Shutdown %s(%d)", mysql_get_shutdown_val(mysql_shutdown, "未知"), mysql_shutdown);
     }
         mysql_set_conn_state(conn_data, RESPONSE_OK);
         break;
@@ -1217,7 +1160,7 @@ mysql_dissect_request(struct buffer *buf, mysql_conn_data_t *conn_data)
     case MYSQL_SET_OPTION:
     {
         uint16_t mysql_option = buf_readInt16LE(buf);
-        LOG_INFO("Mysql Set Option 0x%04x", mysql_option);
+        LOG_INFO("Mysql Set Option %s(0x%04x)", mysql_get_option_val(mysql_option, "未知"), mysql_option);
     }
         mysql_set_conn_state(conn_data, RESPONSE_OK);
         break;
@@ -1265,8 +1208,11 @@ mysql_dissect_request(struct buffer *buf, mysql_conn_data_t *conn_data)
         uint8_t exec_flags = buf_readInt8(buf);
         uint32_t exec_iter = buf_readInt32LE(buf);
 
-        LOG_INFO("Mysql Statement Id %u, Flags 0x%02x, Iter %u",
-                 stmt_id, exec_flags, exec_iter);
+        // 注意: 这里是+5.x协议, 不适用于4.x
+        const char *tofree = mysql_get_exec_flags(exec_flags);
+        LOG_INFO("Mysql Statement Id %u, Flags %s(0x%02x), Iter %u",
+                 stmt_id, tofree, exec_flags, exec_iter);
+        free((void *)tofree);
 
         khint_t k = kh_get(stmts, conn_data->stmts, stmt_id);
         int is_missing = (k == kh_end(conn_data->stmts));
@@ -1289,6 +1235,8 @@ mysql_dissect_request(struct buffer *buf, mysql_conn_data_t *conn_data)
                 buf_retrieve(buf, n);
 
                 uint8_t stmt_bound = buf_readInt8(buf);
+                LOG_INFO("Mysql Parameter Bound: %s", mysql_get_parameter_bound_val(stmt_bound, "未知"));
+
                 if (stmt_bound == 1) // First Call Or Rebound
                 {
                     int stmt_pos;
@@ -1299,6 +1247,10 @@ mysql_dissect_request(struct buffer *buf, mysql_conn_data_t *conn_data)
                         if (!mysql_dissect_exec_param(buf, &param_idx, stmt_data->param_flags[stmt_pos]))
                             break;
                     }
+                }
+                else
+                {
+                    // TODO
                 }
             }
         }
@@ -1680,6 +1632,7 @@ mysql_dissect_session_tracker_entry(struct buffer *buf)
 
     /* session tracker type */
     uint8_t data_type = buf_readInt8(buf);
+    LOG_INFO("Mysql Session Tracker Type: %s(%d)", mysql_get_session_track_type(data_type, "未知"), data_type);
     uint64_t length = buf_readFle(buf, &lenfle, NULL); /* complete length of session tracking entry */
     int sz = 1 + lenfle + length;
 
@@ -1786,35 +1739,37 @@ mysql_dissect_exec_time(struct buffer *buf, uint8_t param_unsigned, int *param_i
     uint8_t param_len = buf_readInt8(buf);
     *param_idx += sizeof(uint8_t);
 
-    uint8_t mysql_exec_field_time_sign = 0;
-    uint32_t mysql_exec_field_time_days = 0;
-    uint8_t mysql_exec_field_hour = 0;
-    uint8_t mysql_exec_field_minute = 0;
-    uint8_t mysql_exec_field_second = 0;
-    uint32_t mysql_exec_field_second_b = 0;
+    // TODO struct
+    uint8_t time_sign = 0;
+    uint32_t time_days = 0;
+    uint8_t hour = 0;
+    uint8_t minute = 0;
+    uint8_t second = 0;
+    uint32_t second_b = 0;
 
     if (param_len >= 1)
     {
-        mysql_exec_field_time_sign = buf_readInt8(buf);
+        time_sign = buf_readInt8(buf);
         *param_idx += sizeof(uint8_t);
+        LOG_INFO("Mysql Time Sign: %s", mysql_get_time_sign(time_sign, "未知"));
     }
     if (param_len >= 5)
     {
-        mysql_exec_field_time_days = buf_readInt32LE(buf);
+        time_days = buf_readInt32LE(buf);
         *param_idx += 3;
     }
     if (param_len >= 8)
     {
-        mysql_exec_field_hour = buf_readInt8(buf);
-        mysql_exec_field_minute = buf_readInt8(buf);
-        mysql_exec_field_second = buf_readInt8(buf);
+        hour = buf_readInt8(buf);
+        minute = buf_readInt8(buf);
+        second = buf_readInt8(buf);
         *param_idx += sizeof(uint8_t);
         *param_idx += sizeof(uint8_t);
         *param_idx += sizeof(uint8_t);
     }
     if (param_len >= 12)
     {
-        mysql_exec_field_second_b = buf_readInt32LE(buf);
+        second_b = buf_readInt32LE(buf);
         *param_idx += sizeof(uint32_t);
     }
 
@@ -1837,38 +1792,39 @@ mysql_dissect_exec_datetime(struct buffer *buf, uint8_t param_unsigned, int *par
     uint8_t param_len = buf_readInt8(buf);
     *param_idx += sizeof(uint8_t);
 
-    uint16_t mysql_exec_field_year = 0;
-    uint8_t mysql_exec_field_month = 0;
-    uint8_t mysql_exec_field_day = 0;
-    uint8_t mysql_exec_field_hour = 0;
-    uint8_t mysql_exec_field_minute = 0;
-    uint8_t mysql_exec_field_second = 0;
-    uint32_t mysql_exec_field_second_b = 0;
+    // TODO struct
+    uint16_t year = 0;
+    uint8_t month = 0;
+    uint8_t day = 0;
+    uint8_t hour = 0;
+    uint8_t minute = 0;
+    uint8_t second = 0;
+    uint32_t second_b = 0;
 
     if (param_len >= 2)
     {
-        mysql_exec_field_year = buf_readInt16LE(buf);
+        year = buf_readInt16LE(buf);
         *param_idx += sizeof(uint16_t);
     }
     if (param_len >= 4)
     {
-        mysql_exec_field_month = buf_readInt8(buf);
-        mysql_exec_field_day = buf_readInt8(buf);
+        month = buf_readInt8(buf);
+        day = buf_readInt8(buf);
         *param_idx += sizeof(uint8_t);
         *param_idx += sizeof(uint8_t);
     }
     if (param_len >= 7)
     {
-        mysql_exec_field_hour = buf_readInt8(buf);
-        mysql_exec_field_minute = buf_readInt8(buf);
-        mysql_exec_field_second = buf_readInt8(buf);
+        hour = buf_readInt8(buf);
+        minute = buf_readInt8(buf);
+        second = buf_readInt8(buf);
         *param_idx += sizeof(uint8_t);
         *param_idx += sizeof(uint8_t);
         *param_idx += sizeof(uint8_t);
     }
     if (param_len >= 11)
     {
-        mysql_exec_field_second_b = buf_readInt32LE(buf);
+        second_b = buf_readInt32LE(buf);
         *param_idx += sizeof(uint32_t);
     }
 
@@ -2325,14 +2281,15 @@ int main(int argc, char **argv)
             assert(opts->interface);
             break;
         case 'p':
-            // size_t needed = snprintf(NULL, 0, , 
+            // size_t needed = snprintf(NULL, 0, ,
             i += snprintf(opts->expression + i, max_filter_sz - i - 1, "tcp and ( port 0 ");
             assert(i <= max_filter_sz - 1);
             while ((port = strsep(&optarg, ",")) != NULL)
             {
                 if (port)
                 {
-                    if (!atoi(port)) {
+                    if (!atoi(port))
+                    {
                         LOG_ERROR("端口号有误 %s", port);
                         goto free;
                     }
