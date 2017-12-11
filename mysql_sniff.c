@@ -2640,9 +2640,9 @@ usage()
 {
     static const char *usage =
         "\nUsage:\n"
-        "   mysql_sniff -i <interface> -p <mysql_server_port1>,<port2>,<port3>... [-v]\n\n"
+        "   ./mysqlsniff -i <interface> -p <mysql_server_port1>,<port2>,<port3>... [-v]\n\n"
         "Example:\n"
-        "   mysql_sniff -i any -p 3306\n";
+        "   ./mysqlsniff -i any -p 3306\n";
     puts(usage);
     exit(1);
 }

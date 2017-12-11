@@ -26,3 +26,13 @@ brew install libpcap
 
 make
 ```
+
+### Usage
+
+```
+Usage:
+   ./mysqlsniff -i <interface> -p <mysql_server_port1>,<port2>,<port3>... [-v]
+
+Example:
+   ./mysqlsniff -i any -p 3306
+```
