@@ -695,6 +695,9 @@ mysql_get_cap_val(uint16_t val, char *def) {
 
 static inline char *
 mysql_get_ext_cap_val(uint16_t val, char *def) {
+    if (val == 0) {
+        return strdup("empty");
+    }
     return val_flag_to_str(mysql_ext_caps_table, val, def);
 }
 
