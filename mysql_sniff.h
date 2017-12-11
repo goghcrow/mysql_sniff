@@ -470,8 +470,8 @@ static const struct val_str mysql_new_parameter_bound_flag_vals[] = {
 };
 
 static const struct val_str mysql_exec_time_sign_vals[] = {
-	{0, "Positive"},
-	{1, "Negative"},
+	{0, "+"},
+	{1, "_"},
 	{0, NULL}
 };
 
@@ -500,6 +500,85 @@ static const struct val_str mysql_session_track_type_vals[] = {
 	{0, NULL}
 };
 
+static const struct val_str mysql_refresh_flag_table[] = {
+    { MYSQL_RFSH_GRANT,     "reload permissions"},
+	{ MYSQL_RFSH_LOG,       "flush logfiles"},
+	{ MYSQL_RFSH_TABLES,    "flush tables"},
+	{ MYSQL_RFSH_HOSTS,     "flush hosts"},
+	{ MYSQL_RFSH_STATUS,    "reset statistics"},
+	{ MYSQL_RFSH_THREADS,   "empty thread cache"},
+	{ MYSQL_RFSH_SLAVE,     "flush slave status"},
+	{ MYSQL_RFSH_MASTER,    "flush master status"},
+	{0, NULL}
+};
+
+static const struct val_str mysql_caps_table[] = {
+	{ MYSQL_CAPS_LP,    "Long Password"},
+	{ MYSQL_CAPS_FR,    "Found Rows"},
+	{ MYSQL_CAPS_LF,    "Long Column Flags"},
+	{ MYSQL_CAPS_CD,    "Connect With Database"},
+	{ MYSQL_CAPS_NS,    "Don't Allow database.table.column"},
+	{ MYSQL_CAPS_CP,    "Can use compression protocol"},
+	{ MYSQL_CAPS_OB,    "ODBC Client"},
+	{ MYSQL_CAPS_LI,    "Can Use LOAD DATA LOCAL"},
+	{ MYSQL_CAPS_IS,    "Ignore Spaces before '('"},
+	{ MYSQL_CAPS_CU,    "Speaks 4.1 protocol (new flag)"},
+	{ MYSQL_CAPS_IA,    "Interactive Client"},
+	{ MYSQL_CAPS_SL,    "Switch to SSL after handshake"},
+	{ MYSQL_CAPS_II,    "Ignore sigpipes"},
+	{ MYSQL_CAPS_TA,    "Knows about transactions"},
+	{ MYSQL_CAPS_RS,    "Speaks 4.1 protocol (old flag)"},
+	{ MYSQL_CAPS_SC,    "Can do 4.1 authentication"},
+    {0, NULL}
+};
+
+static const struct val_str mysql_ext_caps_table[] = {
+    { MYSQL_CAPS_MS,    "Multiple statements"},
+	{ MYSQL_CAPS_MR,    "Multiple results"},
+	{ MYSQL_CAPS_PM,    "PS Multiple results"},
+	{ MYSQL_CAPS_PA,    "Plugin Auth"},
+	{ MYSQL_CAPS_CA,    "Connect attrs"},
+	{ MYSQL_CAPS_AL,    "Plugin Auth LENENC Client Data"},
+	{ MYSQL_CAPS_EP,    "Client can handle expired passwords"},
+	{ MYSQL_CAPS_ST,    "Session variable tracking"},
+	{ MYSQL_CAPS_DE,    "Deprecate EOF"},
+	{ MYSQL_CAPS_UNUSED, "Unused"},
+    {0, NULL}
+};
+
+static const struct val_str mysql_server_status_table[] = {
+	{ MYSQL_STAT_IT,    "In transaction"},
+	{ MYSQL_STAT_AC,    "AUTO_COMMIT"},
+	{ MYSQL_STAT_MR,    "More results"},
+	{ MYSQL_STAT_MU,    "Multi query - more resultsets"},
+	{ MYSQL_STAT_BI,    "Bad index used"},
+	{ MYSQL_STAT_NI,    "No index used"},
+	{ MYSQL_STAT_CR,    "Cursor exists"},
+	{ MYSQL_STAT_LR,    "Last row sent"},
+	{ MYSQL_STAT_DR,    "database dropped"},
+	{ MYSQL_STAT_BS,    "No backslash escapes"},
+	{ MYSQL_STAT_SESSION_STATE_CHANGED, "Session state changed"},
+	{ MYSQL_STAT_QUERY_WAS_SLOW,        "Query was slow"},
+	{ MYSQL_STAT_PS_OUT_PARAMS,         "PS Out Params"},
+    {0, NULL}
+};
+
+static const struct val_str mysql_field_flags_table[] = {
+	{ MYSQL_FLD_NOT_NULL_FLAG,      "Not null"},
+	{ MYSQL_FLD_PRI_KEY_FLAG,       "Primary key"},
+	{ MYSQL_FLD_UNIQUE_KEY_FLAG,    "Unique key"},
+	{ MYSQL_FLD_MULTIPLE_KEY_FLAG,  "Multiple key"},
+	{ MYSQL_FLD_BLOB_FLAG,          "Blob"},
+	{ MYSQL_FLD_UNSIGNED_FLAG,      "Unsigned"},
+	{ MYSQL_FLD_ZEROFILL_FLAG,      "Zero fill"},
+	{ MYSQL_FLD_BINARY_FLAG,        "Binary"},
+	{ MYSQL_FLD_ENUM_FLAG,          "Enum"},
+	{ MYSQL_FLD_AUTO_INCREMENT_FLAG,"Auto increment"},
+	{ MYSQL_FLD_TIMESTAMP_FLAG,     "Timestamp"},
+	{ MYSQL_FLD_SET_FLAG,           "Set"},
+    {0, NULL}
+};
+
 static inline const char *
 val_to_str(const struct val_str *val_strs, uint32_t val, char *def)
 {
@@ -512,6 +591,32 @@ val_to_str(const struct val_str *val_strs, uint32_t val, char *def)
         }
     }
     return def;
+}
+
+// free result
+static inline char *
+val_flag_to_str(const struct val_str *val_strs, uint32_t val, char *def)
+{
+    struct buffer *buf = buf_create_ex(100, 0);
+    struct val_str *p = (struct val_str *)val_strs - 1;
+    while ((++p)->str)
+    {
+        if (p->val & val)
+        {
+			if (buf_readable(buf)) {
+				buf_append(buf, "; ", 1);
+			}
+            buf_append(buf, p->str, strlen(p->str));
+        }
+    }
+    char* ret = NULL; 
+    if (buf_readable(buf)){
+        ret = buf_dupStr(buf, buf_readable(buf));
+    } else {
+        ret = strdup(def);
+    }
+    buf_release(buf);
+    return ret;
 }
 
 static inline const char *
@@ -571,25 +676,36 @@ mysql_get_shutdown_val(uint32_t val, char *def)
     return val_to_str(mysql_shutdown_vals, val, def);
 }
 
+// TODO 确认这里是按比位取值还是枚举
 static inline const char *
-mysql_get_exec_flags(uint8_t val)
+mysql_get_exec_flags_val(uint8_t val, char *def)
 {
-	if (val == 0) {
-		return strdup(mysql_exec_flags_table[0].str);
-	}
-    struct buffer *buf = buf_create_ex(100, 0);
-    struct val_str *p = (struct val_str *)mysql_exec_flags_table - 1;
-    while ((++p)->str)
-    {
-        if (p->val & val)
-        {
-			if (buf_readable(buf)) {
-				buf_append(buf, ";", 1);
-			}
-            buf_append(buf, p->str, strlen(p->str));
-        }
-    }
-    return buf_dupStr(buf, buf_readable(buf));
+    return val_to_str(mysql_exec_flags_table, val, def);
+}
+
+static inline char *
+mysql_get_refresh_val(uint8_t val, char *def) {
+    return val_flag_to_str(mysql_refresh_flag_table, val, def);
+}
+
+static inline char *
+mysql_get_cap_val(uint16_t val, char *def) {
+    return val_flag_to_str(mysql_caps_table, val, def);
+}
+
+static inline char *
+mysql_get_ext_cap_val(uint16_t val, char *def) {
+    return val_flag_to_str(mysql_ext_caps_table, val, def);
+}
+
+static inline char *
+mysql_get_server_status_val(uint16_t val, char *def) {
+    return val_flag_to_str(mysql_server_status_table, val, def);
+}
+
+static inline char *
+mysql_get_field_flags_val(uint16_t val, char *def) {
+    return val_flag_to_str(mysql_field_flags_table, val, def);
 }
 
 #endif

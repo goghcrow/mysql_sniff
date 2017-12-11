@@ -21,13 +21,13 @@
 TODO:
 
 日志级别处理
-FIX 5.7 EOF 问题 conn_data->num_fields = conn_data->stmt_num_params;
-1. 处理 mysql 5.7 协议变更, 无 EOF packet
-0. 5.7 新协议 有问题 SET NAMES utf8 返回 解析有问题,, 状态不对...读到 ResultSet 了
-0. 加大量 文字注释: http://hutaow.com/blog/2013/11/06/mysql-protocol-analysis/
-7. 打印 Server 和 Client 的能力
-5. 支持 统计 sql 执行时间
-1. sannitizer 测试
+- FIX 5.7 EOF 问题 conn_data->num_fields = conn_data->stmt_num_params;
+- 处理 mysql 5.7 协议变更, 无 EOF packet
+- 5.7 新协议 有问题 SET NAMES utf8 返回 解析有问题,, 状态不对...读到 ResultSet 了
+- 加大量 文字注释: http://hutaow.com/blog/2013/11/06/mysql-protocol-analysis/
+- 打印 Server 和 Client 的能力
+- 支持 统计 sql 执行时间
+- sannitizer 测试
 
 
 OK: 支持多mysql端口
@@ -786,7 +786,10 @@ mysql_dissect_greeting(struct buffer *buf, mysql_conn_data_t *conn_data)
 
     /* 2 bytes CAPS */
     conn_data->srv_caps = buf_readInt16LE(buf);
-    LOG_INFO("Server Capabilities 0x%04x", conn_data->srv_caps);
+    char* tofree = mysql_get_cap_val(conn_data->srv_caps, "未知");
+    LOG_INFO("Server Capabilities %s (0x%04x)", tofree, conn_data->srv_caps);
+    free(tofree);
+
     /* rest is optional */
     if (!buf_readable(buf))
     {
@@ -795,15 +798,19 @@ mysql_dissect_greeting(struct buffer *buf, mysql_conn_data_t *conn_data)
 
     /* 1 byte Charset */
     int8_t charset = buf_readInt8(buf);
-    LOG_INFO("Server Charset [%s](0x%02x)", mysql_get_charset(charset, "未知编码"), charset);
+    LOG_INFO("Server Language [%s](0x%02x)", mysql_get_charset(charset, "未知编码"), charset);
 
     /* 2 byte ServerStatus */
     int16_t server_status = buf_readInt16LE(buf);
-    LOG_INFO("Server Statue 0x%04x", server_status);
+    tofree = mysql_get_server_status_val(server_status, "未知");
+    LOG_INFO("Server Statue %s (0x%04x)", tofree, server_status);
+    free(tofree);
 
     /* 2 bytes ExtCAPS */
     conn_data->srv_caps_ext = buf_readInt16LE(buf);
-    LOG_INFO("Server Extended Capabilities 0x%04x", conn_data->srv_caps_ext);
+    tofree = mysql_get_ext_cap_val(conn_data->srv_caps_ext, "未知");
+    LOG_INFO("Server Extended Capabilities %s (0x%04x)", tofree, conn_data->srv_caps_ext);
+    free(tofree);
 
     /* 1 byte Auth Plugin Length */
     int8_t auto_plugin_len = buf_readInt8(buf);
@@ -872,7 +879,9 @@ NullTerminatedString	Client Auth Plugin: e.g. mysql_native_password
 */
 
     conn_data->clnt_caps = buf_readInt16LE(buf);
-    LOG_INFO("Client Capabilities 0x%04x", conn_data->clnt_caps);
+    char *tofree = mysql_get_cap_val(conn_data->clnt_caps, "未知");
+    LOG_INFO("Client Capabilities %s (0x%04x)", tofree, conn_data->clnt_caps);
+    free(tofree);
 
     /* Next packet will be use SSL */
     if (!(conn_data->frame_start_ssl) && conn_data->clnt_caps & MYSQL_CAPS_SL)
@@ -889,11 +898,13 @@ NullTerminatedString	Client Auth Plugin: e.g. mysql_native_password
     {
         /* 2 bytes client caps */
         conn_data->clnt_caps_ext = buf_readInt16LE(buf);
-        LOG_INFO("Client Extended Capabilities 0x%04x", conn_data->clnt_caps_ext);
+        char *tofree = mysql_get_ext_cap_val(conn_data->clnt_caps_ext, "未知");
+        LOG_INFO("Client Extended Capabilities %s (0x%04x)", tofree, conn_data->clnt_caps_ext);
+        free(tofree);
 
         /* 4 bytes max package */
         maxpkt = buf_readInt32LE(buf);
-        LOG_INFO("Client Max Packet %d", maxpkt);
+        LOG_INFO("Client MAX Packet %d", maxpkt);
 
         /* 1 byte Charset */
         charset = buf_readInt8(buf);
@@ -906,7 +917,7 @@ NullTerminatedString	Client Auth Plugin: e.g. mysql_native_password
     { /* pre-4.1 */
         /* 3 bytes max package */
         maxpkt = buf_readInt32LE24(buf);
-        LOG_INFO("Client Max Packet %d", maxpkt);
+        LOG_INFO("Client MAX Packet %d", maxpkt);
     }
 
     /* User name */
@@ -1143,8 +1154,9 @@ mysql_dissect_request(struct buffer *buf, mysql_conn_data_t *conn_data)
     case MYSQL_REFRESH:
     {
         uint8_t mysql_refresh = buf_readInt8(buf);
-        UNUSED(mysql_refresh);
-        LOG_INFO("Mysql Refresh");
+        char *tofree = mysql_get_refresh_val(mysql_refresh, "未知");
+        LOG_INFO("Mysql Refresh %s(0x%02x)", tofree, mysql_refresh);
+        free(tofree);
     }
         mysql_set_conn_state(conn_data, RESPONSE_OK);
         break;
@@ -1152,7 +1164,7 @@ mysql_dissect_request(struct buffer *buf, mysql_conn_data_t *conn_data)
     case MYSQL_SHUTDOWN:
     {
         uint8_t mysql_shutdown = buf_readInt8(buf);
-        LOG_INFO("Mysql Shutdown %s(%d)", mysql_get_shutdown_val(mysql_shutdown, "未知"), mysql_shutdown);
+        LOG_INFO("Mysql Shutdown Level %s(%d)", mysql_get_shutdown_val(mysql_shutdown, "未知"), mysql_shutdown);
     }
         mysql_set_conn_state(conn_data, RESPONSE_OK);
         break;
@@ -1209,10 +1221,8 @@ mysql_dissect_request(struct buffer *buf, mysql_conn_data_t *conn_data)
         uint32_t exec_iter = buf_readInt32LE(buf);
 
         // 注意: 这里是+5.x协议, 不适用于4.x
-        const char *tofree = mysql_get_exec_flags(exec_flags);
         LOG_INFO("Mysql Statement Id %u, Flags %s(0x%02x), Iter %u",
-                 stmt_id, tofree, exec_flags, exec_iter);
-        free((void *)tofree);
+                 stmt_id, mysql_get_exec_flags_val(exec_flags, "未知"), exec_flags, exec_iter);
 
         khint_t k = kh_get(stmts, conn_data->stmts, stmt_id);
         int is_missing = (k == kh_end(conn_data->stmts));
@@ -1333,7 +1343,9 @@ EOF packet.
             uint16_t warn_num = buf_readInt16LE(buf);
             server_status = buf_readInt16LE(buf);
             LOG_INFO("Warnings %d", warn_num);
-            LOG_INFO("Server Status 0x%04x", server_status);
+            char *tofree = mysql_get_server_status_val(server_status, "未知");
+            LOG_INFO("Server Status %s (0x%04x)", tofree, server_status);
+            free(tofree);
         }
 
         switch (conn_data->state)
@@ -1508,19 +1520,21 @@ mysql_dissect_ok_packet(struct buffer *buf, mysql_conn_data_t *conn_data)
     LOG_INFO("OK");
 
     uint64_t affected_rows = buf_readFle(buf, NULL, NULL);
-    LOG_INFO("affected rows %" PRIu64, affected_rows);
+    LOG_INFO("Affected Rows %" PRIu64, affected_rows);
 
     uint64_t insert_id = buf_readFle(buf, NULL, NULL);
     if (insert_id)
     {
-        LOG_INFO("insert id %" PRIu64, insert_id);
+        LOG_INFO("Last INSERT ID %" PRIu64, insert_id);
     }
 
     uint16_t server_status = 0;
     if (buf_readable(buf))
     {
         server_status = buf_readInt16LE(buf);
-        LOG_INFO("Server Status 0x%04x", server_status);
+        char *tofree = mysql_get_server_status_val(server_status, "未知");
+        LOG_INFO("Server Status %s (0x%04x)", tofree, server_status);
+        free(tofree);
 
         /* 4.1+ protocol only: 2 bytes number of warnings */
         if (conn_data->clnt_caps & conn_data->srv_caps & MYSQL_CAPS_CU)
@@ -1602,10 +1616,13 @@ mysql_dissect_field_packet(struct buffer *buf, mysql_conn_data_t *conn_data)
     uint8_t type = buf_readInt8(buf);
     uint16_t flags = buf_readInt16LE(buf);
     uint8_t decimal = buf_readInt8(buf);
-    LOG_INFO("Charset [%s](0x%02x)", mysql_get_charset(charset, "未知编码"), charset);
+    LOG_INFO("Charset [%s](0x%02x)", mysql_get_charset(charset, "未知"), charset);
     LOG_INFO("Length %d", length);
-    LOG_INFO("Type [%s](%d)", mysql_get_field_type(type, "未知类型"), type);
-    LOG_INFO("Flags 0x%04x", flags);
+    LOG_INFO("Type [%s](%d)", mysql_get_field_type(type, "未知"), type);
+    char *tofree = mysql_get_field_flags_val(flags, "未知");
+    LOG_INFO("Flags %s (0x%04x)", tofree, flags);
+    free(tofree);
+
     LOG_INFO("Decimal %d", decimal);
 
     buf_retrieve(buf, 2);
@@ -1740,22 +1757,21 @@ mysql_dissect_exec_time(struct buffer *buf, uint8_t param_unsigned, int *param_i
     *param_idx += sizeof(uint8_t);
 
     // TODO struct
-    uint8_t time_sign = 0;
-    uint32_t time_days = 0;
+    uint8_t sign = 0;
+    uint32_t days = 0;
     uint8_t hour = 0;
     uint8_t minute = 0;
     uint8_t second = 0;
-    uint32_t second_b = 0;
+    uint32_t second_b = 0; // Billionth of a second
 
     if (param_len >= 1)
     {
-        time_sign = buf_readInt8(buf);
+        sign = buf_readInt8(buf);
         *param_idx += sizeof(uint8_t);
-        LOG_INFO("Mysql Time Sign: %s", mysql_get_time_sign(time_sign, "未知"));
     }
     if (param_len >= 5)
     {
-        time_days = buf_readInt32LE(buf);
+        days = buf_readInt32LE(buf);
         *param_idx += 3;
     }
     if (param_len >= 8)
@@ -1781,6 +1797,9 @@ mysql_dissect_exec_time(struct buffer *buf, uint8_t param_unsigned, int *param_i
     }
 
     buf_setReadIndex(buf, idx);
+
+    LOG_INFO("Mysql Time %s%d:%d:%d.%d",
+        mysql_get_time_sign(sign, ""), days * 24 + hour, minute, second, second_b);
 }
 
 static void
@@ -1799,7 +1818,7 @@ mysql_dissect_exec_datetime(struct buffer *buf, uint8_t param_unsigned, int *par
     uint8_t hour = 0;
     uint8_t minute = 0;
     uint8_t second = 0;
-    uint32_t second_b = 0;
+    uint32_t second_b = 0; // Billionth of a second
 
     if (param_len >= 2)
     {
@@ -1836,6 +1855,9 @@ mysql_dissect_exec_datetime(struct buffer *buf, uint8_t param_unsigned, int *par
     }
 
     buf_setReadIndex(buf, idx);
+
+    LOG_INFO("Mysql Datetime %d-%d-%d %d:%d:%d.%d",
+            year, month, day, hour, minute, second, second_b);
 }
 
 static void
