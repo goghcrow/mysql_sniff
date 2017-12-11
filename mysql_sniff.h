@@ -13,6 +13,10 @@ struct val_str
     const char *str;
 };
 
+#if !defined(UNUSED)
+#define UNUSED(x) ((void)(x))
+#endif
+
 #define MYSQL_MAX_PACKET_LEN 0xFFFFFF
 
 /* client/server capabilities

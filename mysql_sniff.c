@@ -13,6 +13,7 @@
 #include <ctype.h>  /*isspace*/
 
 #include "mysql_sniff.h"
+#include "mysql_log.h"
 #include "tcpsniff.h"
 #include "buffer.h"
 #include "khash.h"
@@ -26,26 +27,11 @@ TODO:
 - sannitizer 测试
 */
 
-
 /* 
 thanks and reference
 http://hutaow.com/blog/2013/11/06/mysql-protocol-analysis/
 https://github.com/wireshark/wireshark/blob/master/epan/dissectors/packet-mysql.c 
 */
-
-#if !defined(UNUSED)
-#define UNUSED(x) ((void)(x))
-#endif
-
-#define LOG_INFO(fmt, ...) \
-    fprintf(stderr, "\x1B[1;32m" fmt "\x1B[0m\n", ##__VA_ARGS__);
-
-#define LOG_ERROR(fmt, ...) \
-    fprintf(stderr, "\x1B[1;31m" fmt "\x1B[0m\n", ##__VA_ARGS__);
-
-#define PANIC(fmt, ...)                                                                                              \
-    fprintf(stderr, "\x1B[1;31m" fmt "\x1B[0m in function %s %s:%d\n", ##__VA_ARGS__, __func__, __FILE__, __LINE__); \
-    exit(1);
 
 /*
 这里采用端口识别是否是 Mysql Server
@@ -355,7 +341,8 @@ mysql_fix_tuple4(struct mysql_ss *ss, struct tuple4 *t4)
     }
     else
     {
-        PANIC("接收到无法识别的数据包, 来自端口 sport=%u dport=%u, 请确认监听 Mysql Server 端口", t4->serv_port, t4->cli_port);
+        LOG_ERROR("接收到无法识别的数据包, 来自端口 sport=%u dport=%u, 请确认监听 Mysql Server 端口", t4->serv_port, t4->cli_port);
+        exit(1);
     }
 }
 
@@ -516,7 +503,8 @@ bool mysql_is_completed_pdu(struct buffer *buf)
     int32_t pkt_sz = buf_peekInt32LE24(buf);
     if (pkt_sz <= 0 || pkt_sz >= MYSQL_MAX_PACKET_LEN)
     {
-        PANIC("Malformed Mysql Packet (size=%d)\n", pkt_sz);
+        LOG_ERROR("Malformed Mysql Packet (size=%d)\n", pkt_sz);
+        exit(1);
         return false;
     }
 
@@ -836,7 +824,7 @@ mysql_dissect_greeting(struct buffer *buf, mysql_conn_data_t *conn_data)
 
     /* 2 bytes CAPS */
     conn_data->srv_caps = buf_readInt16LE(buf);
-    char* tofree = mysql_get_cap_val(conn_data->srv_caps, "未知");
+    char *tofree = mysql_get_cap_val(conn_data->srv_caps, "未知");
     LOG_INFO("Server Capabilities %s (0x%04x)", tofree, conn_data->srv_caps);
     free(tofree);
 
@@ -932,7 +920,8 @@ mysql_dissect_login(struct buffer *buf, mysql_conn_data_t *conn_data)
     {
         LOG_INFO("Response: SSL Handshake");
         conn_data->frame_start_ssl = 1;
-        PANIC("不支持 SSL Mysql 协议");
+        LOG_ERROR("不支持 SSL Mysql 协议");
+        exit(1);
     }
 
     uint32_t maxpkt;
@@ -1138,7 +1127,7 @@ mysql_dissect_request(struct buffer *buf, mysql_conn_data_t *conn_data)
         mysql_set_conn_state(conn_data, RESPONSE_MESSAGE);
         break;
 
-    case MYSQL_INIT_DB: 
+    case MYSQL_INIT_DB:
         // 参数1: 数据库名称（字符串到达消息尾部时结束，无结束符）
         // 对应的SQL语句为USE <database>。
     case MYSQL_CREATE_DB:
@@ -1152,7 +1141,7 @@ mysql_dissect_request(struct buffer *buf, mysql_conn_data_t *conn_data)
         mysql_set_conn_state(conn_data, RESPONSE_OK);
         break;
 
-    case MYSQL_QUERY: 
+    case MYSQL_QUERY:
         // 参数1: SQL语句（字符串到达消息尾部时结束，无结束符）
         buf_readStr(buf, g_buf, BUFSZ);
         LOG_INFO("Mysql Query: %s", g_buf);
@@ -1166,41 +1155,41 @@ mysql_dissect_request(struct buffer *buf, mysql_conn_data_t *conn_data)
         LOG_INFO("Mysql Query: %s", g_buf);
         mysql_set_conn_state(conn_data, RESPONSE_PREPARE);
         break;
-    
+
     case MYSQL_STMT_FETCH:
         // 参数1: 4bytes 预处理语句的ID值（小字节序）
         // 参数2: 4bytes 数据的行数（小字节序）
         // 功能：获取预处理语句的执行结果（一次可以获取多行数据）。
-    {
-        uint32_t stmt_id = buf_readInt32LE(buf);
-        uint32_t num_rows = buf_readInt32LE(buf);
-        LOG_INFO("Mysql Statement Fetch StmtId %u NumRows %u", stmt_id, num_rows);
-    }
+        {
+            uint32_t stmt_id = buf_readInt32LE(buf);
+            uint32_t num_rows = buf_readInt32LE(buf);
+            LOG_INFO("Mysql Statement Fetch StmtId %u NumRows %u", stmt_id, num_rows);
+        }
         mysql_set_conn_state(conn_data, RESPONSE_TABULAR);
         break;
 
     case MYSQL_STMT_CLOSE:
         // 参数1: 4bytes	预处理语句的ID值（小字节序）
         // 功能：销毁预处理语句。
-    {
-        uint32_t stmt_id = buf_readInt32LE(buf);
-        LOG_INFO("Mysql Statement Close %u", stmt_id);
-        mysql_set_conn_state(conn_data, REQUEST);
-    }
-    break;
+        {
+            uint32_t stmt_id = buf_readInt32LE(buf);
+            LOG_INFO("Mysql Statement Close %u", stmt_id);
+            mysql_set_conn_state(conn_data, REQUEST);
+        }
+        break;
 
     case MYSQL_STMT_RESET:
         // 参数1: 4bytes	预处理语句的ID值（小字节序）
         // 功能：将预处理语句的参数缓存清空。多数情况和COM_LONG_DATA一起使用。
-    {
-        uint32_t stmt_id = buf_readInt32LE(buf);
-        LOG_INFO("Mysql Reset Statement %u", stmt_id);
-        mysql_set_conn_state(conn_data, RESPONSE_OK);
-    }
-    break;
+        {
+            uint32_t stmt_id = buf_readInt32LE(buf);
+            LOG_INFO("Mysql Reset Statement %u", stmt_id);
+            mysql_set_conn_state(conn_data, RESPONSE_OK);
+        }
+        break;
 
-    case MYSQL_FIELD_LIST: 
-        // 参数1: 表格名称（Null-Terminated String）, 
+    case MYSQL_FIELD_LIST:
+        // 参数1: 表格名称（Null-Terminated String）,
         // 参数2: 字段（列）名称或通配符（可选）
         // 功能：查询某表的字段（列）信息，等同于SQL语句SHOW [FULL] FIELDS FROM ...
         buf_readCStr(buf, g_buf, BUFSZ);
@@ -1211,15 +1200,15 @@ mysql_dissect_request(struct buffer *buf, mysql_conn_data_t *conn_data)
     case MYSQL_PROCESS_KILL:
         // 参数1: 4byte 	连接ID号（小字节序）
         // 功能：要求服务器中断某个连接。等同于SQL语句KILL <id>。
-    {
-        uint32_t mysql_thd_id = buf_readInt32LE(buf);
-        LOG_INFO("Mysql Kill Thread ID %u", mysql_thd_id);
-    }
+        {
+            uint32_t mysql_thd_id = buf_readInt32LE(buf);
+            LOG_INFO("Mysql Kill Thread ID %u", mysql_thd_id);
+        }
         mysql_set_conn_state(conn_data, RESPONSE_OK);
         break;
 
     case MYSQL_CHANGE_USER:
-/**
+        /**
 功能：在不断连接的情况下重新登陆，该操作会销毁MySQL服务器端的会话上下文（包括临时表、会话变量等）。有些连接池用这种方法实现清除会话上下文。
 
 字节	    说明
@@ -1230,34 +1219,34 @@ MySQL 4.1 版本：Length Coded String（长度1+21字节）
 n	    数据库名称（Null-Terminated String）
 2	    字符编码
  */
-    {
-        buf_readCStr(buf, g_buf, BUFSZ);
-        LOG_INFO("Mysql User %s", g_buf);
-
-        if (conn_data->clnt_caps & MYSQL_CAPS_SC)
         {
-            // >= 4.1
-            int len = buf_readInt8(buf);
-            buf_readStr(buf, g_buf, len);
-        }
-        else
-        {
-            // < 4.1
             buf_readCStr(buf, g_buf, BUFSZ);
-        }
-        LOG_INFO("Mysql Password: ");
-        mysql_print_bytes(g_buf, strlen(g_buf));
+            LOG_INFO("Mysql User %s", g_buf);
 
-        buf_readCStr(buf, g_buf, BUFSZ);
-        LOG_INFO("Mysql Schema %s", g_buf);
+            if (conn_data->clnt_caps & MYSQL_CAPS_SC)
+            {
+                // >= 4.1
+                int len = buf_readInt8(buf);
+                buf_readStr(buf, g_buf, len);
+            }
+            else
+            {
+                // < 4.1
+                buf_readCStr(buf, g_buf, BUFSZ);
+            }
+            LOG_INFO("Mysql Password: ");
+            mysql_print_bytes(g_buf, strlen(g_buf));
 
-        if (buf_readable(buf))
-        {
-            uint8_t charset = buf_readInt8(buf);
-            buf_retrieve(buf, 1);
-            LOG_INFO("Charset [%s](0x%02x)", mysql_get_charset(charset, "未知编码"), charset);
+            buf_readCStr(buf, g_buf, BUFSZ);
+            LOG_INFO("Mysql Schema %s", g_buf);
+
+            if (buf_readable(buf))
+            {
+                uint8_t charset = buf_readInt8(buf);
+                buf_retrieve(buf, 1);
+                LOG_INFO("Charset [%s](0x%02x)", mysql_get_charset(charset, "未知编码"), charset);
+            }
         }
-    }
         mysql_set_conn_state(conn_data, RESPONSE_OK);
 
         /* optional: authentication plugin */
@@ -1283,7 +1272,7 @@ n	    数据库名称（Null-Terminated String）
         break;
 
     case MYSQL_REFRESH:
-/**
+        /**
 功能：清除缓存，等同于SQL语句FLUSH，或是执行mysqladmin flush-foo命令时发送该消息。
 
 字节	说明
@@ -1297,17 +1286,17 @@ n	    数据库名称（Null-Terminated String）
     0x40: REFRESH_SLAVE
     0x80: REFRESH_MASTER
 */
-    {
-        uint8_t mysql_refresh = buf_readInt8(buf);
-        char *tofree = mysql_get_refresh_val(mysql_refresh, "未知");
-        LOG_INFO("Mysql Refresh %s(0x%02x)", tofree, mysql_refresh);
-        free(tofree);
-    }
+        {
+            uint8_t mysql_refresh = buf_readInt8(buf);
+            char *tofree = mysql_get_refresh_val(mysql_refresh, "未知");
+            LOG_INFO("Mysql Refresh %s(0x%02x)", tofree, mysql_refresh);
+            free(tofree);
+        }
         mysql_set_conn_state(conn_data, RESPONSE_OK);
         break;
 
     case MYSQL_SHUTDOWN:
-/**
+        /**
 功能：停止MySQL服务。执行mysqladmin shutdown命令时发送该消息。
 字节	说明
 1	停止服务选项
@@ -1320,27 +1309,27 @@ n	    数据库名称（Null-Terminated String）
     0xFE: KILL_QUERY
     0xFF: KILL_CONNECTION
 */
-    {
-        uint8_t mysql_shutdown = buf_readInt8(buf);
-        LOG_INFO("Mysql Shutdown Level %s(%d)", mysql_get_shutdown_val(mysql_shutdown, "未知"), mysql_shutdown);
-    }
+        {
+            uint8_t mysql_shutdown = buf_readInt8(buf);
+            LOG_INFO("Mysql Shutdown Level %s(%d)", mysql_get_shutdown_val(mysql_shutdown, "未知"), mysql_shutdown);
+        }
         mysql_set_conn_state(conn_data, RESPONSE_OK);
         break;
 
     case MYSQL_SET_OPTION:
-    // 参数1: 2bytes 	选项值（小字节序）
-    // 功能：设置语句选项，选项值为/include/mysql_com.h头文件中定义的enum_mysql_set_option枚举类型：
-    // MYSQL_OPTION_MULTI_STATEMENTS_ON
-    // MYSQL_OPTION_MULTI_STATEMENTS_OFF
-    {
-        uint16_t mysql_option = buf_readInt16LE(buf);
-        LOG_INFO("Mysql Set Option %s(0x%04x)", mysql_get_option_val(mysql_option, "未知"), mysql_option);
-    }
+        // 参数1: 2bytes 	选项值（小字节序）
+        // 功能：设置语句选项，选项值为/include/mysql_com.h头文件中定义的enum_mysql_set_option枚举类型：
+        // MYSQL_OPTION_MULTI_STATEMENTS_ON
+        // MYSQL_OPTION_MULTI_STATEMENTS_OFF
+        {
+            uint16_t mysql_option = buf_readInt16LE(buf);
+            LOG_INFO("Mysql Set Option %s(0x%04x)", mysql_get_option_val(mysql_option, "未知"), mysql_option);
+        }
         mysql_set_conn_state(conn_data, RESPONSE_OK);
         break;
 
     case MYSQL_STMT_SEND_LONG_DATA:
-/**
+        /**
 该消息报文有两种形式，一种用于发送二进制数据，另一种用于发送文本数据。
 
 功能：用于发送二进制（BLOB）类型的数据（调用mysql_stmt_send_long_data函数）。
@@ -1357,25 +1346,25 @@ n	数据负载（数据到达消息尾部时结束，无结束符）
 2	数据类型（未使用）
 n	数据负载（数据到达消息尾部时结束，无结束符）
 
- */    
-    {
-        uint32_t stmt_id = buf_readInt32LE(buf);
-        khint_t k = kh_get(stmts, conn_data->stmts, stmt_id);
-        int is_missing = (k == kh_end(conn_data->stmts));
-        if (is_missing)
+ */
         {
-            buf_retrieve(buf, 2);
-        }
-        else
-        {
-            struct mysql_stmt_data *stmt_data = kh_value(conn_data->stmts, stmt_id);
-            uint16_t data_param = buf_readInt16(buf);
-            if (stmt_data->nparam > data_param)
+            uint32_t stmt_id = buf_readInt32LE(buf);
+            khint_t k = kh_get(stmts, conn_data->stmts, stmt_id);
+            int is_missing = (k == kh_end(conn_data->stmts));
+            if (is_missing)
             {
-                stmt_data->param_flags[data_param] |= MYSQL_PARAM_FLAG_STREAMED;
+                buf_retrieve(buf, 2);
+            }
+            else
+            {
+                struct mysql_stmt_data *stmt_data = kh_value(conn_data->stmts, stmt_id);
+                uint16_t data_param = buf_readInt16(buf);
+                if (stmt_data->nparam > data_param)
+                {
+                    stmt_data->param_flags[data_param] |= MYSQL_PARAM_FLAG_STREAMED;
+                }
             }
         }
-    }
 
         if (buf_readable(buf))
         {
@@ -1386,7 +1375,7 @@ n	数据负载（数据到达消息尾部时结束，无结束符）
         break;
 
     case MYSQL_STMT_EXECUTE:
-/**
+        /**
 功能：执行预处理语句。
 
 字节	说明
@@ -1404,65 +1393,65 @@ n	空位图（Null-Bitmap，长度 = (参数数量 + 7) / 8 字节）
 n	每个参数的类型值（长度 = 参数数量 * 2 字节）
 n	每个参数的值
  */
-    {
-        uint32_t stmt_id = buf_readInt32LE(buf);
-        uint8_t exec_flags = buf_readInt8(buf);
-        uint32_t exec_iter = buf_readInt32LE(buf);
-
-        // 注意: 这里是+5.x协议, 不适用于4.x
-        LOG_INFO("Mysql Statement Id %u, Flags %s(0x%02x), Iter %u",
-                 stmt_id, mysql_get_exec_flags_val(exec_flags, "未知"), exec_flags, exec_iter);
-
-        khint_t k = kh_get(stmts, conn_data->stmts, stmt_id);
-        int is_missing = (k == kh_end(conn_data->stmts));
-        // 无元信息, 无法解析 STMT 参数~
-        if (is_missing)
         {
-            if (buf_readable(buf))
-            {
-                buf_readCStr(buf, g_buf, BUFSZ);
-                // mysql prepare response needed
-                // LOG_INFO("Mysql Payload: %s", g_buf); // TODO null str ???
-            }
-        }
-        else
-        {
-            struct mysql_stmt_data *stmt_data = kh_value(conn_data->stmts, stmt_id);
-            if (stmt_data->nparam != 0)
-            {
-                int n = (stmt_data->nparam + 7) / 8; /* NULL bitmap */
-                buf_retrieve(buf, n);
+            uint32_t stmt_id = buf_readInt32LE(buf);
+            uint8_t exec_flags = buf_readInt8(buf);
+            uint32_t exec_iter = buf_readInt32LE(buf);
 
-                uint8_t stmt_bound = buf_readInt8(buf);
-                LOG_INFO("Mysql Parameter Bound: %s", mysql_get_parameter_bound_val(stmt_bound, "未知"));
+            // 注意: 这里是+5.x协议, 不适用于4.x
+            LOG_INFO("Mysql Statement Id %u, Flags %s(0x%02x), Iter %u",
+                     stmt_id, mysql_get_exec_flags_val(exec_flags, "未知"), exec_flags, exec_iter);
 
-                if (stmt_bound == 1) // First Call Or Rebound
+            khint_t k = kh_get(stmts, conn_data->stmts, stmt_id);
+            int is_missing = (k == kh_end(conn_data->stmts));
+            // 无元信息, 无法解析 STMT 参数~
+            if (is_missing)
+            {
+                if (buf_readable(buf))
                 {
-                    int stmt_pos;
-                    // 内存布局: 类型1(2byte),类型2(2byte),...值1,值2
-                    int param_idx = buf_getReadIndex(buf) + stmt_data->nparam * 2;
-                    for (stmt_pos = 0; stmt_pos < stmt_data->nparam; stmt_pos++)
+                    buf_readCStr(buf, g_buf, BUFSZ);
+                    // mysql prepare response needed
+                    // LOG_INFO("Mysql Payload: %s", g_buf); // TODO null str ???
+                }
+            }
+            else
+            {
+                struct mysql_stmt_data *stmt_data = kh_value(conn_data->stmts, stmt_id);
+                if (stmt_data->nparam != 0)
+                {
+                    int n = (stmt_data->nparam + 7) / 8; /* NULL bitmap */
+                    buf_retrieve(buf, n);
+
+                    uint8_t stmt_bound = buf_readInt8(buf);
+                    LOG_INFO("Mysql Parameter Bound: %s", mysql_get_parameter_bound_val(stmt_bound, "未知"));
+
+                    if (stmt_bound == 1) // First Call Or Rebound
                     {
-                        if (!mysql_dissect_exec_param(buf, &param_idx, stmt_data->param_flags[stmt_pos]))
-                            break;
+                        int stmt_pos;
+                        // 内存布局: 类型1(2byte),类型2(2byte),...值1,值2
+                        int param_idx = buf_getReadIndex(buf) + stmt_data->nparam * 2;
+                        for (stmt_pos = 0; stmt_pos < stmt_data->nparam; stmt_pos++)
+                        {
+                            if (!mysql_dissect_exec_param(buf, &param_idx, stmt_data->param_flags[stmt_pos]))
+                                break;
+                        }
+                    }
+                    else
+                    {
+                        // TODO
                     }
                 }
-                else
-                {
-                    // TODO
-                }
             }
-        }
 
-        // TODO 计算 value 的总长度
-        // 消耗掉 已经处理的 value, 和可能附加的其他数据
-        buf_retrieveAll(buf);
-    }
+            // TODO 计算 value 的总长度
+            // 消耗掉 已经处理的 value, 和可能附加的其他数据
+            buf_retrieveAll(buf);
+        }
         mysql_set_conn_state(conn_data, RESPONSE_TABULAR);
         break;
 
     case MYSQL_BINLOG_DUMP:
-/**
+        /**
 功能：该消息是备份连接时由从服务器向主服务器发送的最后一个请求，主服务器收到后，会响应一系列的报文，每个报文都包含一个二进制日志事件。如果主服务器出现故障时，会发送一个EOF报文。
 
 字节	说明
@@ -1471,13 +1460,13 @@ n	每个参数的值
 4	从服务器的服务器ID值（小字节序）
 n	二进制日志的文件名称（可选，默认值为主服务器上第一个有效的文件名）
  */
-    {
-        uint32_t binlog_position = buf_readInt32LE(buf);
-        uint16_t binlog_flags = buf_readInt16(buf); // BIG_ENDIAN !!!
-        uint32_t binlog_server_id = buf_readInt32LE(buf);
-        LOG_INFO("Mysql Binlog Dump binlogPosition %u binlogFlags 0x%04x binlogServerId %u",
-                 binlog_position, binlog_flags, binlog_server_id);
-    }
+        {
+            uint32_t binlog_position = buf_readInt32LE(buf);
+            uint16_t binlog_flags = buf_readInt16(buf); // BIG_ENDIAN !!!
+            uint32_t binlog_server_id = buf_readInt32LE(buf);
+            LOG_INFO("Mysql Binlog Dump binlogPosition %u binlogFlags 0x%04x binlogServerId %u",
+                     binlog_position, binlog_flags, binlog_server_id);
+        }
 
         /* binlog file name ? */
         if (buf_readable(buf))
@@ -1490,7 +1479,7 @@ n	二进制日志的文件名称（可选，默认值为主服务器上第一个
         break;
 
     case MYSQL_TABLE_DUMP:
-/**
+        /**
 功能：将数据表从主服务器复制到从服务器中，执行SQL语句LOAD TABLE ... FROM MASTER时发送该消息。目前该消息已过时，不再使用。
 
 字节	说明
@@ -1511,7 +1500,7 @@ n	主服务器密码（Length Coded String）
 4	安全备份级别（由MySQL服务器rpl_recovery_rank变量设置，暂时未使用）
 4	主服务器ID值（值恒为0x00）
  */
-        LOG_ERROR("Unsupport Mysql Replication Packets")
+        LOG_ERROR("Unsupport Mysql Replication Packets");
         mysql_set_conn_state(conn_data, REQUEST);
         break;
 
@@ -1519,7 +1508,6 @@ n	主服务器密码（Length Coded String）
         mysql_set_conn_state(conn_data, UNDEFINED);
     }
 }
-
 
 /*
 Server 响应报文
@@ -1564,8 +1552,8 @@ EOF packet.
     */
     else if (response_code == 0xfe && buf_readable(buf) < 9)
     { // EOF  !!! < 9
-        
-/**
+
+        /**
 EOF结构用于标识Field和Row Data的结束，在预处理语句中，EOF也被用来标识参数的结束。
 4.1 +
 字节	说明
@@ -1651,7 +1639,7 @@ OK packet.
                 /* This is the OK packet which follows the compressed protocol setup */
                 conn_data->compressed_state = MYSQL_COMPRESS_ACTIVE;
                 // TODO
-                // PANIC("MYSQL_COMPRESS NOT SUPPORT");
+                // LOG_ERROR("MYSQL_COMPRESS NOT SUPPORT");exit(1);
             }
         }
         else
@@ -2233,7 +2221,7 @@ mysql_dissect_exec_time(struct buffer *buf, uint8_t param_unsigned, int *param_i
     buf_setReadIndex(buf, idx);
 
     LOG_INFO("Mysql Time %s%d:%d:%d.%d",
-        mysql_get_time_sign(sign, ""), days * 24 + hour, minute, second, second_b);
+             mysql_get_time_sign(sign, ""), days * 24 + hour, minute, second, second_b);
 }
 
 static void
@@ -2291,7 +2279,7 @@ mysql_dissect_exec_datetime(struct buffer *buf, uint8_t param_unsigned, int *par
     buf_setReadIndex(buf, idx);
 
     LOG_INFO("Mysql Datetime %d-%d-%d %d:%d:%d.%d",
-            year, month, day, hour, minute, second, second_b);
+             year, month, day, hour, minute, second, second_b);
 }
 
 static void
@@ -2582,7 +2570,7 @@ void pkt_handle(void *ud,
             s->conn_data->compressed_state == MYSQL_COMPRESS_ACTIVE)
         {
             LOG_INFO("Start Compressed Active");
-/*
+            /*
  * Decode the header of a compressed packet
  * https://dev.mysql.com/doc/internals/en/compressed-packet-header.html
  * <3bytes packet size> <1byte packet seq> <nbytes Body>
