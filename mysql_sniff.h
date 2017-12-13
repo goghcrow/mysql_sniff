@@ -687,6 +687,12 @@ mysql_get_exec_flags_val(uint8_t val, char *def)
     return val_to_str(mysql_exec_flags_table, val, def);
 }
 
+static inline const char *
+mysql_get_static_val(int8_t val, char *def)
+{
+    return val_to_str(mysql_state_table, val, def);
+}
+
 static inline char *
 mysql_get_refresh_val(uint8_t val, char *def) {
     return val_flag_to_str(mysql_refresh_flag_table, val, def);

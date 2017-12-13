@@ -578,18 +578,10 @@ buf_readFle(struct buffer *buf, uint64_t *len, uint8_t *is_null)
         }
         return buf_readInt16LE(buf);
     case 253:
-        if (len)
-        {
-            *len = 1 + 4;
-        }
-        return buf_readInt32LE(buf);
-        // ???
-        /*
 		if (len) {
 			*len = 1 + 3;
 		}
 		return buf_readInt32LE24(buf);
-		*/
     case 254:
         if (len)
         {
@@ -875,6 +867,7 @@ mysql_dissect_greeting(struct buffer *buf, mysql_conn_data_t *conn_data)
 static void
 mysql_set_conn_state(mysql_conn_data_t *conn_data, mysql_state_t state)
 {
+    LOG_TRACE("Expect Next State \x1b[94m%s\x1b[0m", mysql_get_static_val(state, "未知"));
     conn_data->state = state;
 }
 
@@ -2595,6 +2588,8 @@ void pkt_handle(void *ud,
 
         // TODO 检测是否是 SSL !!!
         bool is_ssl = false;
+
+        LOG_TRACE("%s", is_response ? "RESPONSE" : "REQUEST");
 
         if (is_response)
         {
