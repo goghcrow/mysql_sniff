@@ -31,6 +31,14 @@ TODO:
 thanks and reference
 http://hutaow.com/blog/2013/11/06/mysql-protocol-analysis/
 https://github.com/wireshark/wireshark/blob/master/epan/dissectors/packet-mysql.c 
+
+
+
+whireshark
+static int tvb_get_fle(tvbuff_t *tvb, int offset, guint64 *res, guint8 *is_null) {
+    case 253: return 5;
+}
+应该 return 4;
 */
 
 /*
@@ -122,9 +130,9 @@ struct mysql_conn_data
     char *user;
 };
 
-static uint64_t buf_readFle(struct buffer *buf, uint64_t *len, uint8_t *is_null);
-static int buf_peekFleLen(struct buffer *buf);
-static int buf_dupFleStr(struct buffer *buf, char **str);
+static uint64_t buf_readFLE(struct buffer *buf, uint64_t *len, uint8_t *is_null);
+static int buf_peekFLELen(struct buffer *buf);
+static int buf_dupFLEStr(struct buffer *buf, char **str);
 bool mysql_is_completed_pdu(struct buffer *buf);
 static struct mysql_stmt_data *mysql_stmt_data_create(uint16_t nparam);
 static void mysql_stmt_data_release(struct mysql_stmt_data *stmt_data);
@@ -507,19 +515,23 @@ bool mysql_is_completed_pdu(struct buffer *buf)
         exit(1);
         return false;
     }
-    if (pkt_sz >= MYSQL_WARN_PACKEt_LEN) {
-        LOG_WARN("Receive Pkt Over %d bytes size");
+    if (pkt_sz >= MYSQL_WARN_PACKET_LEN)
+    {
+        LOG_WARN("Receive %d Bytes Mysql Packet", pkt_sz);
     }
 
-    // TODO ?
-    if ((total_sz - pkt_sz) == 7)
-    {
-        return total_sz >= pkt_sz + 7; /* compressed header 3+1+3 (len+id+cmp_len) */
-    }
-    else
-    {
+    // TODO
+    // if ((total_sz - pkt_sz) == 7)
+    // {
+    //     // TODO
+    //     LOG_FATAL("Unsupported Compressed Header");
+    //     exit(1);
+    //     return total_sz >= pkt_sz + 7; /* compressed header 3+1+3 (len+id+cmp_len) */
+    // }
+    // else
+    // {
         return total_sz >= pkt_sz + 4; /* regular header 3+1 (len+id) */
-    }
+    // }
 }
 
 /**
@@ -553,7 +565,7 @@ only appropriate in a Row Data Packet
 254          8           = value of following 64-bit word
 */
 static uint64_t
-buf_readFle(struct buffer *buf, uint64_t *len, uint8_t *is_null)
+buf_readFLE(struct buffer *buf, uint64_t *len, uint8_t *is_null)
 {
     uint8_t prefix = buf_readInt8(buf);
 
@@ -581,10 +593,17 @@ buf_readFle(struct buffer *buf, uint64_t *len, uint8_t *is_null)
         }
         return buf_readInt16LE(buf);
     case 253:
-		if (len) {
-			*len = 1 + 3;
-		}
-		return buf_readInt32LE24(buf);
+        if (len)
+        {
+            *len = 1 + 3;
+        }
+        return buf_readInt32LE24(buf);
+        // TODO ???
+        // if (len)
+        // {
+        //     *len = 1 + 4;
+        // }
+        // return buf_readInt32LE(buf);
     case 254:
         if (len)
         {
@@ -601,7 +620,7 @@ buf_readFle(struct buffer *buf, uint64_t *len, uint8_t *is_null)
 }
 
 static int
-buf_peekFleLen(struct buffer *buf)
+buf_peekFLELen(struct buffer *buf)
 {
     uint8_t prefix = buf_readInt8(buf);
 
@@ -623,10 +642,10 @@ buf_peekFleLen(struct buffer *buf)
 }
 
 static int
-buf_dupFleStr(struct buffer *buf, char **str)
+buf_dupFLEStr(struct buffer *buf, char **str)
 {
     uint64_t len;
-    uint64_t sz = buf_readFle(buf, &len, NULL);
+    uint64_t sz = buf_readFLE(buf, &len, NULL);
     *str = buf_dupStr(buf, sz);
     return len + sz;
 }
@@ -635,7 +654,7 @@ static int
 buf_readFleStr(struct buffer *buf, char *str, int sz)
 {
     uint64_t len;
-    uint64_t sz1 = buf_readFle(buf, &len, NULL);
+    uint64_t sz1 = buf_readFLE(buf, &len, NULL);
     if (sz1 > sz)
     {
         assert(false);
@@ -997,7 +1016,7 @@ mysql_dissect_login(struct buffer *buf, mysql_conn_data_t *conn_data)
     /* optional: connection attributes */
     if (conn_data->clnt_caps_ext & MYSQL_CAPS_CA && buf_readable(buf))
     {
-        uint64_t connattrs_length = buf_readFle(buf, NULL, NULL);
+        uint64_t connattrs_length = buf_readFLE(buf, NULL, NULL);
         while (connattrs_length > 0)
         {
             int length = mysql_dissect_attributes(buf);
@@ -1012,8 +1031,8 @@ mysql_dissect_attributes(struct buffer *buf)
     char *mysql_connattrs_name = NULL;
     char *mysql_connattrs_value = NULL;
 
-    int name_len = buf_dupFleStr(buf, &mysql_connattrs_name);
-    int val_len = buf_dupFleStr(buf, &mysql_connattrs_value);
+    int name_len = buf_dupFLEStr(buf, &mysql_connattrs_name);
+    int val_len = buf_dupFLEStr(buf, &mysql_connattrs_value);
     LOG_INFO("Client Attributes %s %s", mysql_connattrs_name, mysql_connattrs_value);
     free(mysql_connattrs_name);
     free(mysql_connattrs_value);
@@ -1258,7 +1277,7 @@ n	    数据库名称（Null-Terminated String）
         {
             uint64_t lenfle;
             int length;
-            uint64_t connattrs_length = buf_readFle(buf, &lenfle, NULL);
+            uint64_t connattrs_length = buf_readFLE(buf, &lenfle, NULL);
             while (connattrs_length > 0)
             {
                 length = mysql_dissect_attributes(buf);
@@ -1484,7 +1503,7 @@ n	数据表名称（Length Coded String）
  */
     case MYSQL_CONNECT_OUT:
     case MYSQL_REGISTER_SLAVE:
-/**
+        /**
 功能：在从服务器report_host变量设置的情况下，当备份连接时向主服务器发送的注册消息。
 
 字节	说明
@@ -1627,7 +1646,7 @@ OK packet.
         {
             mysql_dissect_response_prepare(buf, conn_data);
         }
-        else if (buf_readable(buf) > buf_peekFleLen(buf))
+        else if (buf_readable(buf) > buf_peekFLELen(buf))
         {
             mysql_dissect_ok_packet(buf, conn_data);
             if (conn_data->compressed_state == MYSQL_COMPRESS_INIT)
@@ -1757,14 +1776,14 @@ static void
 mysql_dissect_result_header(struct buffer *buf, mysql_conn_data_t *conn_data)
 {
     LOG_INFO("Tabular");
-    uint64_t num_fields = buf_readFle(buf, NULL, NULL);
+    uint64_t num_fields = buf_readFLE(buf, NULL, NULL);
     LOG_INFO("num fields %" PRIu64, num_fields);
     // FIX 5.7 EOF 问题
     conn_data->num_fields = num_fields;
     conn_data->cur_field = 0;
     if (buf_readable(buf))
     {
-        uint64_t extra = buf_readFle(buf, NULL, NULL);
+        uint64_t extra = buf_readFLE(buf, NULL, NULL);
         LOG_INFO("extra %" PRIu64, extra);
     }
 
@@ -1830,10 +1849,10 @@ mysql_dissect_ok_packet(struct buffer *buf, mysql_conn_data_t *conn_data)
 {
     LOG_INFO("OK");
 
-    uint64_t affected_rows = buf_readFle(buf, NULL, NULL);
+    uint64_t affected_rows = buf_readFLE(buf, NULL, NULL);
     LOG_INFO("Affected Rows %" PRIu64, affected_rows);
 
-    uint64_t insert_id = buf_readFle(buf, NULL, NULL);
+    uint64_t insert_id = buf_readFLE(buf, NULL, NULL);
     if (insert_id)
     {
         LOG_INFO("Last INSERT ID %" PRIu64, insert_id);
@@ -1861,7 +1880,7 @@ mysql_dissect_ok_packet(struct buffer *buf, mysql_conn_data_t *conn_data)
         {
             int length;
 
-            int lenstr = buf_readFle(buf, NULL, NULL);
+            int lenstr = buf_readFLE(buf, NULL, NULL);
             /* first read the optional message */
             if (lenstr)
             {
@@ -1872,7 +1891,7 @@ mysql_dissect_ok_packet(struct buffer *buf, mysql_conn_data_t *conn_data)
             /* session state tracking */
             if (server_status & MYSQL_STAT_SESSION_STATE_CHANGED)
             {
-                uint64_t session_track_length = buf_readFle(buf, NULL, NULL);
+                uint64_t session_track_length = buf_readFLE(buf, NULL, NULL);
                 LOG_INFO("Session Track Length %" PRIu64, session_track_length);
 
                 while (session_track_length > 0)
@@ -2043,22 +2062,22 @@ mysql_dissect_session_tracker_entry(struct buffer *buf)
     /* session tracker type */
     uint8_t data_type = buf_readInt8(buf);
     LOG_INFO("Mysql Session Tracker Type: %s(%d)", mysql_get_session_track_type(data_type, "未知"), data_type);
-    uint64_t length = buf_readFle(buf, &lenfle, NULL); /* complete length of session tracking entry */
+    uint64_t length = buf_readFLE(buf, &lenfle, NULL); /* complete length of session tracking entry */
     int sz = 1 + lenfle + length;
 
     switch (data_type)
     {
     case 0: /* SESSION_SYSVARS_TRACKER */
-        lenstr = buf_readFle(buf, &lenfle, NULL);
+        lenstr = buf_readFLE(buf, &lenfle, NULL);
         buf_readStr(buf, g_buf, lenstr);
         LOG_INFO("Session Track Sysvar Name %s", g_buf);
 
-        lenstr = buf_readFle(buf, &lenfle, NULL);
+        lenstr = buf_readFLE(buf, &lenfle, NULL);
         buf_readStr(buf, g_buf, lenstr);
         LOG_INFO("Session Track Sysvar Value %s", g_buf);
         break;
     case 1: /* CURRENT_SCHEMA_TRACKER */
-        lenstr = buf_readFle(buf, &lenfle, NULL);
+        lenstr = buf_readFLE(buf, &lenfle, NULL);
         buf_readStr(buf, g_buf, lenstr);
         LOG_INFO("Session Track Sysvar Schema %s", g_buf);
         break;
@@ -2103,13 +2122,19 @@ mysql_dissect_row_packet(struct buffer *buf)
     while (buf_readable(buf))
     {
         uint8_t is_null;
-        uint64_t lelen = buf_readFle(buf, NULL, &is_null);
+        uint64_t len = 0;
+        uint64_t lelen = buf_readFLE(buf, &len, &is_null);
         if (is_null)
         {
             LOG_INFO("NULL");
         }
         else
         {
+            if (buf_readable(buf) < lelen) {
+                // TODO
+                LOG_FATAL("数据异常(%d) buf=%d fle=%d", len, buf_readable(buf), lelen);
+                exit(1);
+            }
             buf_readStr(buf, g_buf, lelen);
             LOG_INFO("Text: %s", g_buf);
         }
@@ -2527,10 +2552,10 @@ void pkt_handle(void *ud,
 
 #ifdef __APPLE__
     LOG_TRACE("%s:%d > %s:%d ack %u, seq %u, sz %zd", s_ip_buf, s_port, d_ip_buf, d_port,
-           ntohl(tcp_hdr->th_ack), ntohl(tcp_hdr->th_seq), payload_size);
+              ntohl(tcp_hdr->th_ack), ntohl(tcp_hdr->th_seq), payload_size);
 #else
     LOG_TRACE("%s:%d > %s:%d ack %u, seq %u, sz %zd", s_ip_buf, s_port, d_ip_buf, d_port,
-           ntohl(tcp_hdr->ack_seq), ntohl(tcp_hdr->seq), payload_size);
+              ntohl(tcp_hdr->ack_seq), ntohl(tcp_hdr->seq), payload_size);
 #endif
 
     struct mysql_ss *ss = (struct mysql_ss *)ud;
@@ -2588,6 +2613,12 @@ void pkt_handle(void *ud,
         // 这里不用担心频繁创建只读视图, 内部有缓存
         struct buffer *rbuf = buf_readonlyView(buf, pkt_sz);
         buf_retrieve(buf, pkt_sz);
+
+        // TODO
+        // if (buf_readable(buf) > 3) {
+        //     pkt_sz = buf_peekInt32LE24(buf);
+        //     LOG_ERROR("next pkt sz %d", pkt_sz);
+        // }
 
         // TODO 检测是否是 SSL !!!
         bool is_ssl = false;

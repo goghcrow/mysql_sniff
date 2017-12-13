@@ -19,7 +19,7 @@ struct val_str
 
 #define MYSQL_MAX_PACKET_LEN 0xFFFFFF
 // 超过体积 warning
-#define MYSQL_WARN_PACKEt_LEN 1024 * 1024
+#define MYSQL_WARN_PACKET_LEN (1024 * 1024)
 
 /* client/server capabilities
  * http://dev.mysql.com/doc/internals/en/capability-flags.html
