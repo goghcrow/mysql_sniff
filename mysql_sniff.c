@@ -501,11 +501,14 @@ bool mysql_is_completed_pdu(struct buffer *buf)
     }
 
     int32_t pkt_sz = buf_peekInt32LE24(buf);
-    if (pkt_sz <= 0 || pkt_sz >= MYSQL_MAX_PACKET_LEN)
+    if (pkt_sz <= 0 || pkt_sz >= MYSQL_MAX_PACKET_LEN - 1)
     {
         LOG_ERROR("Malformed Mysql Packet (size=%d)\n", pkt_sz);
         exit(1);
         return false;
+    }
+    if (pkt_sz >= MYSQL_WARN_PACKEt_LEN) {
+        LOG_WARN("Receive Pkt Over %d bytes size");
     }
 
     // TODO ?
