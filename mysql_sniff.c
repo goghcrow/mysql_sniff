@@ -56,6 +56,7 @@ static char g_buf[BUFSZ]; /* 临时缓存 */
 #define SESSION_BK_SZ 2 << 9
 #define SESSION_BK_IDX(x) ((x) & ((2 << 9) - 1))
 #define SESSION_BUFFER_SZ 8192 /* 每个 half connection 的默认接受缓存大小 */
+#define SESSION_MAX_PORTS 10
 
 // TODO 移除 kthash 依赖
 // 声明需要存储 stmts 的 hashtable 类型 Map<INT64, struct mysql_stmt_data *>
@@ -90,9 +91,9 @@ struct mysql_server
 /* mysql session store */
 struct mysql_ss
 {
-    int sz;                       // 固定大小
-    uint16_t serv_ports[10];      // 最多监听10个 mysql server 端口
-    struct mysql_server *serv[0]; // 不占空间
+    int sz;                  // 固定大小
+    uint16_t serv_ports[SESSION_MAX_PORTS]; // 最多监听mysql server 端口数
+    struct mysql_server *serv[0];
 };
 
 struct mysql_stmt_data
@@ -120,6 +121,8 @@ struct mysql_conn_data
     uint16_t stmt_num_params;
     uint16_t stmt_num_fields;
     khash_t(stmts) * stmts;
+
+    // ssl 与 压缩均不支持~
     uint32_t frame_start_ssl;
     uint32_t frame_start_compressed;
     uint8_t compressed_state;
@@ -195,6 +198,7 @@ mysql_conn_data_create()
     d->compressed_state = MYSQL_COMPRESS_NONE;
     d->num_fields = 0;
     d->cur_field = 0;
+    d->user = strdup("未知");
 
     return d;
 }
@@ -218,8 +222,9 @@ mysql_conn_data_release(struct mysql_conn_data *d)
             mysql_stmt_data_release(stmt_data);
         }
     }
-
     kh_destroy(stmts, d->stmts);
+
+    memset(d, 0, sizeof(*d));
     free(d);
 }
 
@@ -272,6 +277,7 @@ mysql_session_release(struct mysql_session *s)
 static struct mysql_ss *
 mysql_ss_create(uint16_t serv_ports[], int sz)
 {
+    assert(sz <= SESSION_MAX_PORTS);
     int i;
     struct mysql_ss *ss = calloc(1, sizeof(*ss) + sz * sizeof(struct mysql_server));
     if (ss == NULL)
@@ -349,7 +355,7 @@ mysql_fix_tuple4(struct mysql_ss *ss, struct tuple4 *t4)
     }
     else
     {
-        LOG_ERROR("接收到无法识别的数据包, 来自端口 sport=%u dport=%u, 请确认监听 Mysql Server 端口", t4->serv_port, t4->cli_port);
+        LOG_FATAL("接收到无法识别的数据包, 来自端口 sport=%u dport=%u, 请确认监听 Mysql Server 端口", t4->serv_port, t4->cli_port);
         exit(1);
     }
 }
@@ -509,7 +515,7 @@ bool mysql_is_completed_pdu(struct buffer *buf)
     }
 
     int32_t pkt_sz = buf_peekInt32LE24(buf);
-    if (pkt_sz <= 0 || pkt_sz >= MYSQL_MAX_PACKET_LEN - 1)
+    if (pkt_sz <= 0 || pkt_sz >= MYSQL_MAX_PACKET_LEN)
     {
         LOG_ERROR("Malformed Mysql Packet (size=%d)\n", pkt_sz);
         exit(1);
@@ -523,14 +529,13 @@ bool mysql_is_completed_pdu(struct buffer *buf)
     // TODO
     // if ((total_sz - pkt_sz) == 7)
     // {
-    //     // TODO
     //     LOG_FATAL("Unsupported Compressed Header");
     //     exit(1);
     //     return total_sz >= pkt_sz + 7; /* compressed header 3+1+3 (len+id+cmp_len) */
     // }
     // else
     // {
-        return total_sz >= pkt_sz + 4; /* regular header 3+1 (len+id) */
+    return total_sz >= pkt_sz + 4; /* regular header 3+1 (len+id) */
     // }
 }
 
@@ -622,7 +627,7 @@ buf_readFLE(struct buffer *buf, uint64_t *len, uint8_t *is_null)
 static int
 buf_peekFLELen(struct buffer *buf)
 {
-    uint8_t prefix = buf_readInt8(buf);
+    uint8_t prefix = buf_peekInt8(buf);
 
     switch (prefix)
     {
@@ -631,9 +636,9 @@ buf_peekFLELen(struct buffer *buf)
     case 252:
         return 1 + 2;
     case 253:
-        return 1 + 4;
-        // TODO
         return 1 + 3;
+        // TODO ???
+        // return 1 + 4;
     case 254:
         return 1 + 8;
     default: /* < 251 */
@@ -646,6 +651,10 @@ buf_dupFLEStr(struct buffer *buf, char **str)
 {
     uint64_t len;
     uint64_t sz = buf_readFLE(buf, &len, NULL);
+    if (buf_readable(buf) < sz) {
+        LOG_FATAL("Malformed Data In buf_dupFLEStr, buf=%d sz=%d", buf_readable(buf), sz);
+        exit(1);
+    }
     *str = buf_dupStr(buf, sz);
     return len + sz;
 }
@@ -657,10 +666,15 @@ buf_readFleStr(struct buffer *buf, char *str, int sz)
     uint64_t sz1 = buf_readFLE(buf, &len, NULL);
     if (sz1 > sz)
     {
+        LOG_FATAL("buf_readFleStr fail, fle=%d sz=%d", sz1, sz);
         assert(false);
         return -1;
     }
 
+    if (buf_readable(buf) < sz1)
+    {
+        sz1 = buf_readable(buf);
+    }
     buf_readStr(buf, str, sz1);
     return len + sz1;
 }
@@ -807,7 +821,7 @@ Extended Client Capabilities: 0x0008
 static void
 mysql_dissect_greeting(struct buffer *buf, mysql_conn_data_t *conn_data)
 {
-    LOG_INFO("Server Greeting");
+    LOG_DEBUG("Server Greeting");
     int protocol = buf_readInt8(buf);
     if (protocol == 0xff)
     {
@@ -816,19 +830,19 @@ mysql_dissect_greeting(struct buffer *buf, mysql_conn_data_t *conn_data)
     }
 
     mysql_set_conn_state(conn_data, LOGIN);
-    LOG_INFO("Protocol 0x%02x", protocol);
+    LOG_DEBUG("Protocol 0x%02x", protocol);
 
     // null 结尾字符串, Banner
     buf_readCStr(buf, g_buf, BUFSZ);
-    LOG_INFO("Server Version: %s", g_buf);
+    LOG_DEBUG("Server Version: %s", g_buf);
 
     /* 4 bytes little endian thread_id */
     int thread_id = buf_readInt32LE(buf);
-    LOG_INFO("Server Thread Id %d", thread_id);
+    LOG_DEBUG("Server Thread Id %d", thread_id);
 
     /* salt string */
     buf_readCStr(buf, g_buf, BUFSZ);
-    // LOG_INFO("Salt %s", g_buf);
+    LOG_DEBUG("Salt %s", g_buf);
 
     /* rest is optional */
     if (!buf_readable(buf))
@@ -839,7 +853,7 @@ mysql_dissect_greeting(struct buffer *buf, mysql_conn_data_t *conn_data)
     /* 2 bytes CAPS */
     conn_data->srv_caps = buf_readInt16LE(buf);
     char *tofree = mysql_get_cap_val(conn_data->srv_caps, "未知");
-    LOG_INFO("Server Capabilities %s (0x%04x)", tofree, conn_data->srv_caps);
+    LOG_DEBUG("Server Capabilities %s (0x%04x)", tofree, conn_data->srv_caps);
     free(tofree);
 
     /* rest is optional */
@@ -850,18 +864,18 @@ mysql_dissect_greeting(struct buffer *buf, mysql_conn_data_t *conn_data)
 
     /* 1 byte Charset */
     int8_t charset = buf_readInt8(buf);
-    LOG_INFO("Server Language [%s](0x%02x)", mysql_get_charset(charset, "未知编码"), charset);
+    LOG_DEBUG("Server Language [%s](0x%02x)", mysql_get_charset(charset, "未知"), charset);
 
     /* 2 byte ServerStatus */
     int16_t server_status = buf_readInt16LE(buf);
     tofree = mysql_get_server_status_val(server_status, "未知");
-    LOG_INFO("Server Statue %s (0x%04x)", tofree, server_status);
+    LOG_DEBUG("Server Statue %s (0x%04x)", tofree, server_status);
     free(tofree);
 
     /* 2 bytes ExtCAPS */
     conn_data->srv_caps_ext = buf_readInt16LE(buf);
     tofree = mysql_get_ext_cap_val(conn_data->srv_caps_ext, "未知");
-    LOG_INFO("Server Extended Capabilities %s (0x%04x)", tofree, conn_data->srv_caps_ext);
+    LOG_DEBUG("Server Extended Capabilities %s (0x%04x)", tofree, conn_data->srv_caps_ext);
     free(tofree);
 
     /* 1 byte Auth Plugin Length */
@@ -875,21 +889,21 @@ mysql_dissect_greeting(struct buffer *buf, mysql_conn_data_t *conn_data)
     if (buf_readable(buf))
     {
         buf_readCStr(buf, g_buf, BUFSZ);
-        // LOG_INFO("Server Rest Salt %s", g_buf);
+        LOG_DEBUG("Server Rest Salt %s", g_buf);
     }
 
     /* 5.x server: auth plugin */
     if (buf_readable(buf))
     {
         buf_readCStr(buf, g_buf, BUFSZ);
-        LOG_INFO("Server Auth Plugin: %s", g_buf);
+        LOG_DEBUG("Server Auth Plugin: %s", g_buf);
     }
 }
 
 static void
 mysql_set_conn_state(mysql_conn_data_t *conn_data, mysql_state_t state)
 {
-    LOG_TRACE("Expect Next State \x1b[94m%s\x1b[0m", mysql_get_static_val(state, "未知"));
+    LOG_TRACE("Next State \x1b[94m%s\x1b[0m", mysql_get_static_val(state, "未知"));
     conn_data->state = state;
 }
 
@@ -920,22 +934,22 @@ NullTerminatedString	Client Auth Plugin: e.g. mysql_native_password
 static void
 mysql_dissect_login(struct buffer *buf, mysql_conn_data_t *conn_data)
 {
-    LOG_INFO("Login Request");
+    LOG_DEBUG("Login Request");
 
     /* after login there can be OK or DENIED */
     mysql_set_conn_state(conn_data, RESPONSE_OK);
 
     conn_data->clnt_caps = buf_readInt16LE(buf);
     char *tofree = mysql_get_cap_val(conn_data->clnt_caps, "未知");
-    LOG_INFO("Client Capabilities %s (0x%04x)", tofree, conn_data->clnt_caps);
+    LOG_DEBUG("Client Capabilities %s (0x%04x)", tofree, conn_data->clnt_caps);
     free(tofree);
 
     /* Next packet will be use SSL */
     if (!(conn_data->frame_start_ssl) && conn_data->clnt_caps & MYSQL_CAPS_SL)
     {
-        LOG_INFO("Response: SSL Handshake");
+        LOG_DEBUG("Response: SSL Handshake");
         conn_data->frame_start_ssl = 1;
-        LOG_ERROR("不支持 SSL Mysql 协议");
+        LOG_FATAL("Unsupport SSL Protocol");
         exit(1);
     }
 
@@ -947,16 +961,16 @@ mysql_dissect_login(struct buffer *buf, mysql_conn_data_t *conn_data)
         /* 2 bytes client caps */
         conn_data->clnt_caps_ext = buf_readInt16LE(buf);
         char *tofree = mysql_get_ext_cap_val(conn_data->clnt_caps_ext, "未知");
-        LOG_INFO("Client Extended Capabilities %s (0x%04x)", tofree, conn_data->clnt_caps_ext);
+        LOG_DEBUG("Client Extended Capabilities %s (0x%04x)", tofree, conn_data->clnt_caps_ext);
         free(tofree);
 
         /* 4 bytes max package */
         maxpkt = buf_readInt32LE(buf);
-        LOG_INFO("Client MAX Packet %d", maxpkt);
+        LOG_DEBUG("Client MAX Packet %d", maxpkt);
 
         /* 1 byte Charset */
         charset = buf_readInt8(buf);
-        LOG_INFO("Client Charset [%s](0x%02x)", mysql_get_charset(charset, "未知编码"), charset);
+        LOG_DEBUG("Client Charset [%s](0x%02x)", mysql_get_charset(charset, "未知编码"), charset);
 
         /* filler 23 bytes */
         buf_retrieve(buf, 23);
@@ -965,12 +979,12 @@ mysql_dissect_login(struct buffer *buf, mysql_conn_data_t *conn_data)
     { /* pre-4.1 */
         /* 3 bytes max package */
         maxpkt = buf_readInt32LE24(buf);
-        LOG_INFO("Client MAX Packet %d", maxpkt);
+        LOG_DEBUG("Client MAX Packet %d", maxpkt);
     }
 
     /* User name */
     buf_readCStr(buf, g_buf, BUFSZ);
-    LOG_INFO("Client User %s", g_buf);
+    LOG_DEBUG("Client User %s", g_buf);
     conn_data->user = strdup(g_buf);
 
     /* rest is optional */
@@ -989,8 +1003,7 @@ mysql_dissect_login(struct buffer *buf, mysql_conn_data_t *conn_data)
     {
         buf_readCStr(buf, g_buf, BUFSZ);
     }
-    LOG_INFO("Client Password:");
-    mysql_print_bytes(g_buf, strlen(g_buf));
+    LOG_DEBUG("Client Password: %s", g_buf);
 
     if (!buf_readable(buf))
     {
@@ -1001,7 +1014,7 @@ mysql_dissect_login(struct buffer *buf, mysql_conn_data_t *conn_data)
     if (conn_data->clnt_caps & MYSQL_CAPS_CD)
     {
         buf_readCStr(buf, g_buf, BUFSZ);
-        LOG_INFO("Client Schema %s", g_buf);
+        LOG_DEBUG("Client Schema %s", g_buf);
     }
 
     /* optional: authentication plugin */
@@ -1010,7 +1023,7 @@ mysql_dissect_login(struct buffer *buf, mysql_conn_data_t *conn_data)
         mysql_set_conn_state(conn_data, AUTH_SWITCH_REQUEST);
 
         buf_readCStr(buf, g_buf, BUFSZ);
-        LOG_INFO("Client Auth Plugin %s", g_buf);
+        LOG_DEBUG("Client Auth Plugin %s", g_buf);
     }
 
     /* optional: connection attributes */
@@ -1033,7 +1046,7 @@ mysql_dissect_attributes(struct buffer *buf)
 
     int name_len = buf_dupFLEStr(buf, &mysql_connattrs_name);
     int val_len = buf_dupFLEStr(buf, &mysql_connattrs_value);
-    LOG_INFO("Client Attributes %s %s", mysql_connattrs_name, mysql_connattrs_value);
+    LOG_DEBUG("Client Attributes %s %s", mysql_connattrs_name, mysql_connattrs_value);
     free(mysql_connattrs_name);
     free(mysql_connattrs_value);
     return name_len + val_len;
@@ -1042,7 +1055,7 @@ mysql_dissect_attributes(struct buffer *buf)
 static void
 mysql_dissect_auth_switch_request(struct buffer *buf, mysql_conn_data_t *conn_data)
 {
-    LOG_INFO("Auth Switch Request");
+    LOG_DEBUG("Auth Switch Request");
     mysql_set_conn_state(conn_data, AUTH_SWITCH_RESPONSE);
 
     /* Status (Always 0xfe) */
@@ -1051,18 +1064,18 @@ mysql_dissect_auth_switch_request(struct buffer *buf, mysql_conn_data_t *conn_da
 
     /* name */
     buf_readCStr(buf, g_buf, BUFSZ);
-    LOG_INFO("Request Name: %s", g_buf);
+    LOG_DEBUG("Request Name: %s", g_buf);
 
     /* Data */
     buf_readCStr(buf, g_buf, BUFSZ);
-    LOG_INFO("Request Data: %s", g_buf);
+    LOG_DEBUG("Request Data: %s", g_buf);
 }
 
 static void
 mysql_dissect_auth_switch_response(struct buffer *buf, mysql_conn_data_t *conn_data)
 {
     buf_readCStr(buf, g_buf, BUFSZ);
-    LOG_INFO("Auth Switch Response, Data: %s", g_buf);
+    LOG_DEBUG("Auth Switch Response, Data: %s", g_buf);
 }
 
 /*
@@ -1109,20 +1122,20 @@ mysql_dissect_request(struct buffer *buf, mysql_conn_data_t *conn_data)
 {
     if (conn_data->state == AUTH_SWITCH_RESPONSE)
     {
-        LOG_INFO("Request");
+        LOG_DEBUG("Request");
         mysql_dissect_auth_switch_response(buf, conn_data);
         return;
     }
 
     int opcode = buf_readInt8(buf);
-    LOG_INFO("Request Opcode 0x%02x %s", opcode, mysql_get_command(opcode, "未知命令"));
+    LOG_DEBUG("Request Opcode 0x%02x %s", opcode, mysql_get_command(opcode, "未知命令"));
 
     switch (opcode)
     {
 
     case MYSQL_QUIT:
         // 功能：关闭当前连接（客户端退出），无参数。
-        LOG_INFO("Client Quit");
+        LOG_DEBUG("Client Quit");
         break;
 
     case MYSQL_PROCESS_INFO:
@@ -1152,14 +1165,14 @@ mysql_dissect_request(struct buffer *buf, mysql_conn_data_t *conn_data)
         // 参数1: 数据库名称（字符串到达消息尾部时结束，无结束符）
         // 功能：删除数据库，该消息已过时，而被SQL语句DROP DATABASE代替。
         buf_readCStr(buf, g_buf, BUFSZ);
-        LOG_INFO("Mysql Schema: %s", g_buf);
+        LOG_DEBUG("Mysql Schema: %s", g_buf);
         mysql_set_conn_state(conn_data, RESPONSE_OK);
         break;
 
     case MYSQL_QUERY:
         // 参数1: SQL语句（字符串到达消息尾部时结束，无结束符）
         buf_readStr(buf, g_buf, BUFSZ);
-        LOG_INFO("Mysql Query: %s", g_buf);
+        LOG_DEBUG("Mysql Query: %s", g_buf);
         mysql_set_conn_state(conn_data, RESPONSE_TABULAR);
         break;
 
@@ -1167,7 +1180,7 @@ mysql_dissect_request(struct buffer *buf, mysql_conn_data_t *conn_data)
         // 参数1: 带有"?"占位符的SQL语句（字符串到达消息尾部时结束，无结束符）
         // 功能：预处理SQL语句，使用带有"?"占位符的SQL语句时发送该消息。
         buf_readStr(buf, g_buf, BUFSZ);
-        LOG_INFO("Mysql Query: %s", g_buf);
+        LOG_DEBUG("Mysql Query: %s", g_buf);
         mysql_set_conn_state(conn_data, RESPONSE_PREPARE);
         break;
 
@@ -1178,7 +1191,7 @@ mysql_dissect_request(struct buffer *buf, mysql_conn_data_t *conn_data)
         {
             uint32_t stmt_id = buf_readInt32LE(buf);
             uint32_t num_rows = buf_readInt32LE(buf);
-            LOG_INFO("Mysql Statement Fetch StmtId %u NumRows %u", stmt_id, num_rows);
+            LOG_DEBUG("Mysql Statement Fetch StmtId %u NumRows %u", stmt_id, num_rows);
         }
         mysql_set_conn_state(conn_data, RESPONSE_TABULAR);
         break;
@@ -1188,7 +1201,7 @@ mysql_dissect_request(struct buffer *buf, mysql_conn_data_t *conn_data)
         // 功能：销毁预处理语句。
         {
             uint32_t stmt_id = buf_readInt32LE(buf);
-            LOG_INFO("Mysql Statement Close %u", stmt_id);
+            LOG_DEBUG("Mysql Statement Close %u", stmt_id);
             mysql_set_conn_state(conn_data, REQUEST);
         }
         break;
@@ -1198,7 +1211,7 @@ mysql_dissect_request(struct buffer *buf, mysql_conn_data_t *conn_data)
         // 功能：将预处理语句的参数缓存清空。多数情况和COM_LONG_DATA一起使用。
         {
             uint32_t stmt_id = buf_readInt32LE(buf);
-            LOG_INFO("Mysql Reset Statement %u", stmt_id);
+            LOG_DEBUG("Mysql Reset Statement %u", stmt_id);
             mysql_set_conn_state(conn_data, RESPONSE_OK);
         }
         break;
@@ -1208,7 +1221,7 @@ mysql_dissect_request(struct buffer *buf, mysql_conn_data_t *conn_data)
         // 参数2: 字段（列）名称或通配符（可选）
         // 功能：查询某表的字段（列）信息，等同于SQL语句SHOW [FULL] FIELDS FROM ...
         buf_readCStr(buf, g_buf, BUFSZ);
-        LOG_INFO("Mysql Table Name %s", g_buf);
+        LOG_DEBUG("Mysql Table Name %s", g_buf);
         mysql_set_conn_state(conn_data, RESPONSE_SHOW_FIELDS);
         break;
 
@@ -1217,7 +1230,7 @@ mysql_dissect_request(struct buffer *buf, mysql_conn_data_t *conn_data)
         // 功能：要求服务器中断某个连接。等同于SQL语句KILL <id>。
         {
             uint32_t mysql_thd_id = buf_readInt32LE(buf);
-            LOG_INFO("Mysql Kill Thread ID %u", mysql_thd_id);
+            LOG_DEBUG("Mysql Kill Thread ID %u", mysql_thd_id);
         }
         mysql_set_conn_state(conn_data, RESPONSE_OK);
         break;
@@ -1236,7 +1249,7 @@ n	    数据库名称（Null-Terminated String）
  */
         {
             buf_readCStr(buf, g_buf, BUFSZ);
-            LOG_INFO("Mysql User %s", g_buf);
+            LOG_DEBUG("Mysql User %s", g_buf);
 
             if (conn_data->clnt_caps & MYSQL_CAPS_SC)
             {
@@ -1249,17 +1262,17 @@ n	    数据库名称（Null-Terminated String）
                 // < 4.1
                 buf_readCStr(buf, g_buf, BUFSZ);
             }
-            LOG_INFO("Mysql Password: ");
+            LOG_DEBUG("Mysql Password: ");
             mysql_print_bytes(g_buf, strlen(g_buf));
 
             buf_readCStr(buf, g_buf, BUFSZ);
-            LOG_INFO("Mysql Schema %s", g_buf);
+            LOG_DEBUG("Mysql Schema %s", g_buf);
 
             if (buf_readable(buf))
             {
                 uint8_t charset = buf_readInt8(buf);
                 buf_retrieve(buf, 1);
-                LOG_INFO("Charset [%s](0x%02x)", mysql_get_charset(charset, "未知编码"), charset);
+                LOG_DEBUG("Charset [%s](0x%02x)", mysql_get_charset(charset, "未知编码"), charset);
             }
         }
         mysql_set_conn_state(conn_data, RESPONSE_OK);
@@ -1269,7 +1282,7 @@ n	    数据库名称（Null-Terminated String）
         {
             mysql_set_conn_state(conn_data, AUTH_SWITCH_REQUEST);
             buf_readCStr(buf, g_buf, BUFSZ);
-            LOG_INFO("Mysql Client Auth Plugin %s", g_buf);
+            LOG_DEBUG("Mysql Client Auth Plugin %s", g_buf);
         }
 
         /* optional: connection attributes */
@@ -1304,7 +1317,7 @@ n	    数据库名称（Null-Terminated String）
         {
             uint8_t mysql_refresh = buf_readInt8(buf);
             char *tofree = mysql_get_refresh_val(mysql_refresh, "未知");
-            LOG_INFO("Mysql Refresh %s(0x%02x)", tofree, mysql_refresh);
+            LOG_DEBUG("Mysql Refresh %s(0x%02x)", tofree, mysql_refresh);
             free(tofree);
         }
         mysql_set_conn_state(conn_data, RESPONSE_OK);
@@ -1326,7 +1339,7 @@ n	    数据库名称（Null-Terminated String）
 */
         {
             uint8_t mysql_shutdown = buf_readInt8(buf);
-            LOG_INFO("Mysql Shutdown Level %s(%d)", mysql_get_shutdown_val(mysql_shutdown, "未知"), mysql_shutdown);
+            LOG_DEBUG("Mysql Shutdown Level %s(%d)", mysql_get_shutdown_val(mysql_shutdown, "未知"), mysql_shutdown);
         }
         mysql_set_conn_state(conn_data, RESPONSE_OK);
         break;
@@ -1338,7 +1351,7 @@ n	    数据库名称（Null-Terminated String）
         // MYSQL_OPTION_MULTI_STATEMENTS_OFF
         {
             uint16_t mysql_option = buf_readInt16LE(buf);
-            LOG_INFO("Mysql Set Option %s(0x%04x)", mysql_get_option_val(mysql_option, "未知"), mysql_option);
+            LOG_DEBUG("Mysql Set Option %s(0x%04x)", mysql_get_option_val(mysql_option, "未知"), mysql_option);
         }
         mysql_set_conn_state(conn_data, RESPONSE_OK);
         break;
@@ -1384,7 +1397,7 @@ n	数据负载（数据到达消息尾部时结束，无结束符）
         if (buf_readable(buf))
         {
             buf_readStr(buf, g_buf, BUFSZ);
-            LOG_INFO("Mysql Send Long Data: %s", g_buf); // TODO
+            LOG_DEBUG("Mysql Send Long Data: %s", g_buf); // TODO
         }
         mysql_set_conn_state(conn_data, REQUEST);
         break;
@@ -1414,7 +1427,7 @@ n	每个参数的值
             uint32_t exec_iter = buf_readInt32LE(buf);
 
             // 注意: 这里是+5.x协议, 不适用于4.x
-            LOG_INFO("Mysql Statement Id %u, Flags %s(0x%02x), Iter %u",
+            LOG_DEBUG("Mysql Statement Id %u, Flags %s(0x%02x), Iter %u",
                      stmt_id, mysql_get_exec_flags_val(exec_flags, "未知"), exec_flags, exec_iter);
 
             khint_t k = kh_get(stmts, conn_data->stmts, stmt_id);
@@ -1426,7 +1439,7 @@ n	每个参数的值
                 {
                     buf_readCStr(buf, g_buf, BUFSZ);
                     // mysql prepare response needed
-                    // LOG_INFO("Mysql Payload: %s", g_buf); // TODO null str ???
+                    // LOG_DEBUG("Mysql Payload: %s", g_buf); // TODO null str ???
                 }
             }
             else
@@ -1438,7 +1451,7 @@ n	每个参数的值
                     buf_retrieve(buf, n);
 
                     uint8_t stmt_bound = buf_readInt8(buf);
-                    LOG_INFO("Mysql Parameter Bound: %s", mysql_get_parameter_bound_val(stmt_bound, "未知"));
+                    LOG_DEBUG("Mysql Parameter Bound: %s", mysql_get_parameter_bound_val(stmt_bound, "未知"));
 
                     if (stmt_bound == 1) // First Call Or Rebound
                     {
@@ -1479,7 +1492,7 @@ n	二进制日志的文件名称（可选，默认值为主服务器上第一个
             uint32_t binlog_position = buf_readInt32LE(buf);
             uint16_t binlog_flags = buf_readInt16(buf); // BIG_ENDIAN !!!
             uint32_t binlog_server_id = buf_readInt32LE(buf);
-            LOG_INFO("Mysql Binlog Dump binlogPosition %u binlogFlags 0x%04x binlogServerId %u",
+            LOG_DEBUG("Mysql Binlog Dump binlogPosition %u binlogFlags 0x%04x binlogServerId %u",
                      binlog_position, binlog_flags, binlog_server_id);
         }
 
@@ -1487,7 +1500,7 @@ n	二进制日志的文件名称（可选，默认值为主服务器上第一个
         if (buf_readable(buf))
         {
             buf_readCStr(buf, g_buf, BUFSZ);
-            LOG_INFO("Mysql Binlog File Name %s", g_buf);
+            LOG_DEBUG("Mysql Binlog File Name %s", g_buf);
         }
 
         mysql_set_conn_state(conn_data, REQUEST);
@@ -1546,7 +1559,7 @@ mysql_dissect_response(struct buffer *buf, mysql_conn_data_t *conn_data)
 
     if (response_code == 0xff)
     { // ERR
-        LOG_INFO("Response Code Error 0x%02x", response_code);
+        LOG_DEBUG("Response Code Error 0x%02x", response_code);
         buf_retrieve(buf, sizeof(uint8_t));
         mysql_dissect_error_packet(buf);
         mysql_set_conn_state(conn_data, REQUEST);
@@ -1582,18 +1595,18 @@ EOF结构用于标识Field和Row Data的结束，在预处理语句中，EOF也�
 包长度小于9字节
 附：EOF结构的相关处理函数： 服务器：protocol.cc源文件中的send_eof函数
 */
-        LOG_INFO("Response Code EOF 0x%02x", response_code);
+        LOG_DEBUG("Response Code EOF 0x%02x", response_code);
         uint8_t mysql_eof = buf_readInt8(buf);
-        LOG_INFO("EOF Marker 0x%02x", mysql_eof);
+        LOG_DEBUG("EOF Marker 0x%02x", mysql_eof);
 
         /* pre-4.1 packet ends here */
         if (buf_readable(buf))
         {
             uint16_t warn_num = buf_readInt16LE(buf);
             server_status = buf_readInt16LE(buf);
-            LOG_INFO("Warnings %d", warn_num);
+            LOG_DEBUG("Warnings %d", warn_num);
             char *tofree = mysql_get_server_status_val(server_status, "未知");
-            LOG_INFO("Server Status %s (0x%04x)", tofree, server_status);
+            LOG_DEBUG("Server Status %s (0x%04x)", tofree, server_status);
             free(tofree);
         }
 
@@ -1641,7 +1654,7 @@ OK packet.
     */
     else if (response_code == 0x00 /*&& buf_readable(buf) > 9*/)
     { // OK
-        LOG_INFO("Response Code OK 0x%02x", response_code);
+        LOG_DEBUG("Response Code OK 0x%02x", response_code);
         if (conn_data->state == RESPONSE_PREPARE)
         {
             mysql_dissect_response_prepare(buf, conn_data);
@@ -1653,8 +1666,8 @@ OK packet.
             {
                 /* This is the OK packet which follows the compressed protocol setup */
                 conn_data->compressed_state = MYSQL_COMPRESS_ACTIVE;
-                // TODO
-                // LOG_ERROR("MYSQL_COMPRESS NOT SUPPORT");exit(1);
+                LOG_FATAL("Unsupported Compressed Protocol");
+                exit(1);
             }
         }
         else
@@ -1668,7 +1681,7 @@ OK packet.
         {
         case RESPONSE_MESSAGE:
             buf_readStr(buf, g_buf, BUFSZ); // 读取所有
-            LOG_INFO("Message %s", g_buf);
+            LOG_DEBUG("Message %s", g_buf);
             mysql_set_conn_state(conn_data, REQUEST);
             break;
 
@@ -1731,7 +1744,9 @@ Row result set(Text or Binary) will now be terminated with OK packet.
             break;
 
         default:
-            // 未知状态, 数据丢弃
+            // 未知状态
+            LOG_TRACE("Undefined State, Raw:");
+            mysql_print_bytes(buf_peek(buf), buf_readable(buf));
             mysql_set_conn_state(conn_data, UNDEFINED);
             break;
         }
@@ -1775,16 +1790,16 @@ Field结构计数：用于标识Field结构的数量，取值范围0x00-0xFA。
 static void
 mysql_dissect_result_header(struct buffer *buf, mysql_conn_data_t *conn_data)
 {
-    LOG_INFO("Tabular");
+    LOG_DEBUG("Tabular");
     uint64_t num_fields = buf_readFLE(buf, NULL, NULL);
-    LOG_INFO("num fields %" PRIu64, num_fields);
+    LOG_DEBUG("num fields %" PRIu64, num_fields);
     // FIX 5.7 EOF 问题
     conn_data->num_fields = num_fields;
     conn_data->cur_field = 0;
     if (buf_readable(buf))
     {
         uint64_t extra = buf_readFLE(buf, NULL, NULL);
-        LOG_INFO("extra %" PRIu64, extra);
+        LOG_DEBUG("extra %" PRIu64, extra);
     }
 
     if (num_fields)
@@ -1847,15 +1862,15 @@ n	  服务器消息（字符串到达消息尾部时结束，无结束符，可�
 static void
 mysql_dissect_ok_packet(struct buffer *buf, mysql_conn_data_t *conn_data)
 {
-    LOG_INFO("OK");
+    LOG_DEBUG("OK");
 
     uint64_t affected_rows = buf_readFLE(buf, NULL, NULL);
-    LOG_INFO("Affected Rows %" PRIu64, affected_rows);
+    LOG_DEBUG("Affected Rows %" PRIu64, affected_rows);
 
     uint64_t insert_id = buf_readFLE(buf, NULL, NULL);
     if (insert_id)
     {
-        LOG_INFO("Last INSERT ID %" PRIu64, insert_id);
+        LOG_DEBUG("Last INSERT ID %" PRIu64, insert_id);
     }
 
     uint16_t server_status = 0;
@@ -1863,14 +1878,14 @@ mysql_dissect_ok_packet(struct buffer *buf, mysql_conn_data_t *conn_data)
     {
         server_status = buf_readInt16LE(buf);
         char *tofree = mysql_get_server_status_val(server_status, "未知");
-        LOG_INFO("Server Status %s (0x%04x)", tofree, server_status);
+        LOG_DEBUG("Server Status %s (0x%04x)", tofree, server_status);
         free(tofree);
 
         /* 4.1+ protocol only: 2 bytes number of warnings */
         if (conn_data->clnt_caps & conn_data->srv_caps & MYSQL_CAPS_CU)
         {
             uint16_t warn_num = buf_readInt16LE(buf);
-            LOG_INFO("Server Warnings %d", warn_num);
+            LOG_DEBUG("Server Warnings %d", warn_num);
         }
     }
 
@@ -1885,14 +1900,14 @@ mysql_dissect_ok_packet(struct buffer *buf, mysql_conn_data_t *conn_data)
             if (lenstr)
             {
                 buf_readStr(buf, g_buf, lenstr);
-                LOG_INFO("Session Track Message %s", g_buf);
+                LOG_DEBUG("Session Track Message %s", g_buf);
             }
 
             /* session state tracking */
             if (server_status & MYSQL_STAT_SESSION_STATE_CHANGED)
             {
                 uint64_t session_track_length = buf_readFLE(buf, NULL, NULL);
-                LOG_INFO("Session Track Length %" PRIu64, session_track_length);
+                LOG_DEBUG("Session Track Length %" PRIu64, session_track_length);
 
                 while (session_track_length > 0)
                 {
@@ -1908,7 +1923,7 @@ mysql_dissect_ok_packet(struct buffer *buf, mysql_conn_data_t *conn_data)
         if (buf_readable(buf))
         {
             buf_readCStr(buf, g_buf, BUFSZ);
-            LOG_INFO("Message %s", g_buf);
+            LOG_DEBUG("Message %s", g_buf);
         }
     }
 
@@ -2002,25 +2017,25 @@ static void
 mysql_dissect_field_packet(struct buffer *buf, mysql_conn_data_t *conn_data)
 {
     conn_data->cur_field++;
-    LOG_INFO("Field %" PRIu64, conn_data->cur_field);
+    LOG_DEBUG("Field %" PRIu64, conn_data->cur_field);
 
     buf_readFleStr(buf, g_buf, BUFSZ);
-    LOG_INFO("Catalog %s", g_buf);
+    LOG_DEBUG("Catalog %s", g_buf);
 
     buf_readFleStr(buf, g_buf, BUFSZ);
-    LOG_INFO("Database %s", g_buf);
+    LOG_DEBUG("Database %s", g_buf);
 
     buf_readFleStr(buf, g_buf, BUFSZ);
-    LOG_INFO("Table %s", g_buf);
+    LOG_DEBUG("Table %s", g_buf);
 
     buf_readFleStr(buf, g_buf, BUFSZ);
-    LOG_INFO("Original Table %s", g_buf);
+    LOG_DEBUG("Original Table %s", g_buf);
 
     buf_readFleStr(buf, g_buf, BUFSZ);
-    LOG_INFO("Name %s", g_buf);
+    LOG_DEBUG("Name %s", g_buf);
 
     buf_readFleStr(buf, g_buf, BUFSZ);
-    LOG_INFO("Orginal Name %s", g_buf);
+    LOG_DEBUG("Orginal Name %s", g_buf);
 
     buf_retrieve(buf, 1);
 
@@ -2029,13 +2044,13 @@ mysql_dissect_field_packet(struct buffer *buf, mysql_conn_data_t *conn_data)
     uint8_t type = buf_readInt8(buf);
     uint16_t flags = buf_readInt16LE(buf);
     uint8_t decimal = buf_readInt8(buf);
-    LOG_INFO("Charset [%s](0x%02x)", mysql_get_charset(charset, "未知"), charset);
-    LOG_INFO("Length %d", length);
-    LOG_INFO("Type [%s](%d)", mysql_get_field_type(type, "未知"), type);
+    LOG_DEBUG("Charset [%s](0x%02x)", mysql_get_charset(charset, "未知"), charset);
+    LOG_DEBUG("Length %d", length);
+    LOG_DEBUG("Type [%s](%d)", mysql_get_field_type(type, "未知"), type);
     char *tofree = mysql_get_field_flags_val(flags, "未知");
-    LOG_INFO("Flags %s (0x%04x)", tofree, flags);
+    LOG_DEBUG("Flags %s (0x%04x)", tofree, flags);
     free(tofree);
-    LOG_INFO("Decimal %d", decimal);
+    LOG_DEBUG("Decimal %d", decimal);
 
     buf_retrieve(buf, 2);
 
@@ -2043,7 +2058,7 @@ mysql_dissect_field_packet(struct buffer *buf, mysql_conn_data_t *conn_data)
     if (buf_readable(buf))
     {
         buf_readFleStr(buf, g_buf, BUFSZ);
-        LOG_INFO("Default %s", g_buf);
+        LOG_DEBUG("Default %s", g_buf);
     }
 }
 
@@ -2061,7 +2076,7 @@ mysql_dissect_session_tracker_entry(struct buffer *buf)
 
     /* session tracker type */
     uint8_t data_type = buf_readInt8(buf);
-    LOG_INFO("Mysql Session Tracker Type: %s(%d)", mysql_get_session_track_type(data_type, "未知"), data_type);
+    LOG_DEBUG("Mysql Session Tracker Type: %s(%d)", mysql_get_session_track_type(data_type, "未知"), data_type);
     uint64_t length = buf_readFLE(buf, &lenfle, NULL); /* complete length of session tracking entry */
     int sz = 1 + lenfle + length;
 
@@ -2070,22 +2085,22 @@ mysql_dissect_session_tracker_entry(struct buffer *buf)
     case 0: /* SESSION_SYSVARS_TRACKER */
         lenstr = buf_readFLE(buf, &lenfle, NULL);
         buf_readStr(buf, g_buf, lenstr);
-        LOG_INFO("Session Track Sysvar Name %s", g_buf);
+        LOG_DEBUG("Session Track Sysvar Name %s", g_buf);
 
         lenstr = buf_readFLE(buf, &lenfle, NULL);
         buf_readStr(buf, g_buf, lenstr);
-        LOG_INFO("Session Track Sysvar Value %s", g_buf);
+        LOG_DEBUG("Session Track Sysvar Value %s", g_buf);
         break;
     case 1: /* CURRENT_SCHEMA_TRACKER */
         lenstr = buf_readFLE(buf, &lenfle, NULL);
         buf_readStr(buf, g_buf, lenstr);
-        LOG_INFO("Session Track Sysvar Schema %s", g_buf);
+        LOG_DEBUG("Session Track Sysvar Schema %s", g_buf);
         break;
     case 2: /* SESSION_STATE_CHANGE_TRACKER */
-        LOG_INFO("Session Track State Change");
+        LOG_DEBUG("Session Track State Change");
         break;
     default: /* unsupported types skipped */
-        LOG_INFO("UnSupported Session Track Types");
+        LOG_DEBUG("Unsupported Session Track Types");
     }
 
     return sz;
@@ -2126,17 +2141,18 @@ mysql_dissect_row_packet(struct buffer *buf)
         uint64_t lelen = buf_readFLE(buf, &len, &is_null);
         if (is_null)
         {
-            LOG_INFO("NULL");
+            LOG_DEBUG("NULL");
         }
         else
         {
-            if (buf_readable(buf) < lelen) {
+            if (buf_readable(buf) < lelen)
+            {
                 // TODO
-                LOG_FATAL("数据异常(%d) buf=%d fle=%d", len, buf_readable(buf), lelen);
+                LOG_FATAL("Malformed Data In mysql_dissect_row_packet, buf=%d fle=%d", len, buf_readable(buf), lelen);
                 exit(1);
             }
             buf_readStr(buf, g_buf, lelen);
-            LOG_INFO("Text: %s", g_buf);
+            LOG_DEBUG("Text: %s", g_buf);
         }
     }
 }
@@ -2184,7 +2200,7 @@ mysql_dissect_exec_string(struct buffer *buf, uint8_t param_unsigned, int *param
     }
 
     buf_readStr(buf, g_buf, param_len);
-    LOG_INFO("String %s", g_buf);
+    LOG_DEBUG("String %s", g_buf);
     *param_idx += param_len;
 
     buf_setReadIndex(buf, idx);
@@ -2241,7 +2257,7 @@ mysql_dissect_exec_time(struct buffer *buf, uint8_t param_unsigned, int *param_i
 
     buf_setReadIndex(buf, idx);
 
-    LOG_INFO("Mysql Time %s%d:%d:%d.%d",
+    LOG_DEBUG("Mysql Time %s%d:%d:%d.%d",
              mysql_get_time_sign(sign, ""), days * 24 + hour, minute, second, second_b);
 }
 
@@ -2299,7 +2315,7 @@ mysql_dissect_exec_datetime(struct buffer *buf, uint8_t param_unsigned, int *par
 
     buf_setReadIndex(buf, idx);
 
-    LOG_INFO("Mysql Datetime %d-%d-%d %d:%d:%d.%d",
+    LOG_DEBUG("Mysql Datetime %d-%d-%d %d:%d:%d.%d",
              year, month, day, hour, minute, second, second_b);
 }
 
@@ -2314,11 +2330,11 @@ mysql_dissect_exec_tiny(struct buffer *buf, uint8_t param_unsigned, int *param_i
 
     if (param_unsigned)
     {
-        LOG_INFO("Mysql Exec Tiny %hhu", mysql_exec_field_tiny);
+        LOG_DEBUG("Mysql Exec Tiny %hhu", mysql_exec_field_tiny);
     }
     else
     {
-        LOG_INFO("Mysql Exec Tiny %hhd", (int8_t)mysql_exec_field_tiny);
+        LOG_DEBUG("Mysql Exec Tiny %hhd", (int8_t)mysql_exec_field_tiny);
     }
 
     buf_setReadIndex(buf, idx);
@@ -2334,11 +2350,11 @@ mysql_dissect_exec_short(struct buffer *buf, uint8_t param_unsigned, int *param_
     *param_idx += sizeof(uint16_t);
     if (param_unsigned)
     {
-        LOG_INFO("Mysql Exec Short %hu", mysql_exec_field_short);
+        LOG_DEBUG("Mysql Exec Short %hu", mysql_exec_field_short);
     }
     else
     {
-        LOG_INFO("Mysql Exec Short %hd", (int16_t)mysql_exec_field_short);
+        LOG_DEBUG("Mysql Exec Short %hd", (int16_t)mysql_exec_field_short);
     }
 
     buf_setReadIndex(buf, idx);
@@ -2354,11 +2370,11 @@ mysql_dissect_exec_long(struct buffer *buf, uint8_t param_unsigned, int *param_i
     *param_idx += sizeof(uint32_t);
     if (param_unsigned)
     {
-        LOG_INFO("Mysql Exec Long %u", mysql_exec_field_long);
+        LOG_DEBUG("Mysql Exec Long %u", mysql_exec_field_long);
     }
     else
     {
-        LOG_INFO("Mysql Exec Long %d", (int32_t)mysql_exec_field_long);
+        LOG_DEBUG("Mysql Exec Long %d", (int32_t)mysql_exec_field_long);
     }
 
     buf_setReadIndex(buf, idx);
@@ -2373,7 +2389,7 @@ mysql_dissect_exec_float(struct buffer *buf, uint8_t param_unsigned, int *param_
     // 注意 这里不是小端
     float mysql_exec_field_float = *((float *)buf_peek(buf));
     *param_idx += sizeof(uint32_t);
-    LOG_INFO("Mysql Exec Float %f", mysql_exec_field_float);
+    LOG_DEBUG("Mysql Exec Float %f", mysql_exec_field_float);
 
     buf_setReadIndex(buf, idx);
 }
@@ -2387,7 +2403,7 @@ mysql_dissect_exec_double(struct buffer *buf, uint8_t param_unsigned, int *param
     // 注意 这里不是小端
     double mysql_exec_field_double = *((double *)buf_peek(buf));
     *param_idx += sizeof(uint64_t);
-    LOG_INFO("Mysql Exec Double %f", mysql_exec_field_double);
+    LOG_DEBUG("Mysql Exec Double %f", mysql_exec_field_double);
 
     buf_setReadIndex(buf, idx);
 }
@@ -2402,11 +2418,11 @@ mysql_dissect_exec_longlong(struct buffer *buf, uint8_t param_unsigned, int *par
     *param_idx += sizeof(uint64_t);
     if (param_unsigned)
     {
-        LOG_INFO("Mysql Exec LongLong %" PRIu64, mysql_exec_field_longlong);
+        LOG_DEBUG("Mysql Exec LongLong %" PRIu64, mysql_exec_field_longlong);
     }
     else
     {
-        LOG_INFO("Mysql Exec LongLong %" PRId64, (int64_t)mysql_exec_field_longlong);
+        LOG_DEBUG("Mysql Exec LongLong %" PRId64, (int64_t)mysql_exec_field_longlong);
     }
 
     buf_setReadIndex(buf, idx);
@@ -2415,7 +2431,7 @@ mysql_dissect_exec_longlong(struct buffer *buf, uint8_t param_unsigned, int *par
 static void
 mysql_dissect_exec_null(struct buffer *buf, uint8_t param_unsigned, int *param_idx)
 {
-    LOG_INFO("Mysql Exec NULL");
+    LOG_DEBUG("Mysql Exec NULL");
     // TODO test NULL 是否消耗 value 字节数
 }
 
@@ -2430,7 +2446,7 @@ mysql_dissect_exec_param(struct buffer *buf, int *param_idx, uint8_t param_flags
 
     if ((param_flags & MYSQL_PARAM_FLAG_STREAMED) == MYSQL_PARAM_FLAG_STREAMED)
     {
-        LOG_INFO("Streamed Parameter");
+        LOG_DEBUG("Streamed Parameter");
         return 1;
     }
     while (mysql_exec_dissectors[dissector_index].dissector != NULL)
@@ -2480,7 +2496,7 @@ mysql_dissect_response_prepare(struct buffer *buf, mysql_conn_data_t *conn_data)
     conn_data->stmt_num_fields = buf_readInt16LE(buf);
     conn_data->stmt_num_params = buf_readInt16LE(buf);
 
-    LOG_INFO("Mysql Statement Id %u, Fields %u, Params %u",
+    LOG_DEBUG("Mysql Statement Id %u, Fields %u, Params %u",
              stmt_id, conn_data->stmt_num_fields, conn_data->stmt_num_params);
 
     // TODO 这里需要同时处理 字段数量 与 参数数量
@@ -2503,7 +2519,7 @@ mysql_dissect_response_prepare(struct buffer *buf, mysql_conn_data_t *conn_data)
 
     // TODO
     uint16_t warn_num = buf_readInt16LE(buf);
-    LOG_INFO("Warnings %d", warn_num);
+    LOG_DEBUG("Warnings %d", warn_num);
 
     if (conn_data->stmt_num_params > 0)
     {
@@ -2590,7 +2606,9 @@ void pkt_handle(void *ud,
         if (s->conn_data->frame_start_compressed &&
             s->conn_data->compressed_state == MYSQL_COMPRESS_ACTIVE)
         {
-            LOG_INFO("Start Compressed Active");
+            LOG_FATAL("Start Compressed Active(NOT SUPPORT)");
+            exit(1);
+
             /*
  * Decode the header of a compressed packet
  * https://dev.mysql.com/doc/internals/en/compressed-packet-header.html
@@ -2608,7 +2626,7 @@ void pkt_handle(void *ud,
 
         int32_t pkt_sz = buf_readInt32LE24(buf);
         uint8_t pkt_num = buf_readInt8(buf);
-        LOG_INFO("%s:%d > %s:%d pkt_sz %d, pkt_no %d", s_ip_buf, s_port, d_ip_buf, d_port, pkt_sz, pkt_num);
+        LOG_DEBUG("%s:%d > %s:%d pkt_sz %d, pkt_no %d", s_ip_buf, s_port, d_ip_buf, d_port, pkt_sz, pkt_num);
 
         // 这里不用担心频繁创建只读视图, 内部有缓存
         struct buffer *rbuf = buf_readonlyView(buf, pkt_sz);
@@ -2828,7 +2846,7 @@ int main(int argc, char **argv)
         .filter_exp = opts->expression,
         .ud = ss};
 
-    LOG_INFO("interface %s, expression %s", opts->interface, opts->expression);
+    LOG_DEBUG("interface %s, expression %s", opts->interface, opts->expression);
 
     tcpsniff(&sniffopt, pkt_handle); // 内部有错误输出, 不需要判断...
 

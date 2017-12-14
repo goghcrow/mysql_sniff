@@ -51,3 +51,4 @@ Module.symvers
 Mkfile.old
 dkms.conf
 mysqlsniff
+mysqlsniff_debug
