@@ -36,3 +36,43 @@ Usage:
 Example:
    ./mysqlsniff -i any -p 3306
 ```
+
+### 问题
+
+发现 CentOS 2.6.32-696.3.1.el6.x86_64 下 libpcap 丢包严重;
+
+加入检测, 退出程序, 否则会造成捕获报文不完整, 解析异常;
+
+```
+ERROR Packet loss found(recv=566, drop=12, ifddrop=0).
+ERROR Packet loss found(recv=2234, drop=289, ifddrop=0).
+```
+
+### 解决方案
+
+安装 PF_RING, 编译并加载内核模块;
+
+```
+git clone https://github.com/ntop/PF_RING.git
+cd PF_RING
+make
+cd kernel
+sudo insmod ./pf_ring.ko
+```
+
+其中 PF_RING/userland 会产生适配 PF_RING 的 libpcap 与 tcpdump
+
+观察安装前后 tcpdump 版本验证;
+
+```
+$ tcpdump --version
+tcpdump version 4.1-PRE-CVS_2017_03_21
+libpcap version 1.4.0
+```
+安装后:
+
+```
+$ tcpdump --version
+tcpdump version 4.9.0
+libpcap version 1.8.1
+```

@@ -230,6 +230,7 @@ bool tcpsniff(struct tcpsniff_opt *opt, tcpsniff_pkt_handler pkt_handler)
     }
 
     struct pcap_pkthdr *pkt_hdr = NULL;
+    struct pcap_stat ps;
     const u_char *pkt = NULL;
     int ret = 0;
     sniffing = true;
@@ -248,6 +249,14 @@ bool tcpsniff(struct tcpsniff_opt *opt, tcpsniff_pkt_handler pkt_handler)
         }
 
         pcap_pkt_handler(&sniff, pkt_hdr, pkt);
+        if (pcap_stats(sniff.handle, &ps) == -1) {
+            fprintf(stderr, "ERROR in pcap_stats: %s\n", pcap_geterr(sniff.handle));
+        } else {
+            if (ps.ps_drop || ps.ps_ifdrop) {
+                fprintf(stderr, "ERROR Packet loss found(recv=%d, drop=%d, ifddrop=%d).\n", ps.ps_recv, ps.ps_drop, ps.ps_ifdrop);
+                exit(1);
+            }
+        }
     }
 
     return true;
